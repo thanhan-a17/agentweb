@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from agentweb.cli import main
@@ -382,3 +384,264 @@ def test_official_docs_with_report_a_bug_are_not_blocked():
     core._classify_fetch_result(result)
     assert result.ok is True
     assert "blocker_or_login_wall" not in result.warnings
+
+
+def test_duckduckgo_html_captures_snippet_outside_title_div(monkeypatch):
+    raw = '''
+    <div class="result results_links">
+      <div><div><a class="result__a" href="https://example.com/next">Next.js hydration fix</a></div></div>
+      <a class="result__snippet" href="https://example.com/next">Use useEffect for browser-only localStorage state.</a>
+    </div>
+    <div class="result results_links">
+      <div><div><a class="result__a" href="https://example.com/ramen">Tokyo Station ramen guide</a></div></div>
+      <a class="result__snippet" href="https://example.com/ramen">Best ramen shops in Tokyo Station.</a>
+    </div>
+    '''
+
+    class Resp:
+        status_code = 200
+        text = raw
+
+    monkeypatch.setattr(core.requests, "get", lambda *args, **kwargs: Resp())
+    results = core._search_duckduckgo_html("Next.js hydration fix", max_results=5, timeout=5)
+    assert results[0].snippet == "Use useEffect for browser-only localStorage state."
+
+
+def test_stackoverflow_search_provider_returns_questions(monkeypatch):
+    class Resp:
+        def json(self):
+            return {"items": [{
+                "title": "React custom localstorage hook hydration error in NextJS",
+                "link": "https://stackoverflow.com/questions/73944543/react-custom-localstorage-hook-hydration-error-in-nextjs",
+                "score": 12,
+                "answer_count": 2,
+                "tags": ["reactjs", "next.js", "local-storage"],
+            }]}
+
+    monkeypatch.setattr(core.requests, "get", lambda *args, **kwargs: Resp())
+    results = core._search_stackoverflow("Next.js hydration mismatch localStorage useEffect fix", max_results=5, timeout=5)
+    assert results[0].source == "stackoverflow"
+    assert "hydration error" in results[0].title
+    assert "2 answers" in results[0].snippet
+
+
+def test_research_uses_search_snippets_when_fetches_are_blocked(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "search_web",
+        lambda query, max_results=6, timeout=20: [
+            core.SearchResult(
+                "React custom localstorage hook hydration error in NextJS",
+                "https://stackoverflow.com/questions/73944543/react-custom-localstorage-hook-hydration-error-in-nextjs",
+                "Use useEffect for browser-only localStorage state to avoid hydration mismatch.",
+                "stackoverflow",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        core,
+        "fetch_url",
+        lambda *args, **kwargs: core.FetchResult(
+            url=args[0],
+            final_url=args[0],
+            ok=False,
+            status_code=403,
+            title="Just a moment...",
+            text="Just a moment... Cloudflare",
+            warnings=["blocker_or_login_wall"],
+        ),
+    )
+    pack = research("Next.js hydration mismatch localStorage useEffect fix", max_results=1, timeout=5)
+    assert pack["status"] == "ok"
+    assert pack["sources"][0]["source"] == "search_snippet"
+    assert pack["answer_pack"]["evidence"]
+
+
+# ── Screenshot tests ──────────────────────────────────────────────
+
+def test_take_screenshot_returns_path_on_success(monkeypatch, tmp_path):
+    """_take_screenshot should return a file path when Playwright succeeds."""
+    screenshot_path = str(tmp_path / "page.png")
+
+    def mock_run(*args, **kwargs):
+        Path(screenshot_path).write_bytes(b"fake_png_data")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(core.subprocess, "run", mock_run)
+    monkeypatch.setattr(core.shutil, "which", lambda x: "/usr/bin/python3")
+    monkeypatch.setattr("tempfile.mkstemp", lambda suffix, prefix=None, dir=None: (0, screenshot_path))
+
+    result = core._take_screenshot("https://example.com", timeout=10)
+    assert result == screenshot_path
+    assert Path(result).exists()
+
+
+def test_take_screenshot_returns_empty_when_playwright_missing(monkeypatch):
+    """_take_screenshot returns '' when Playwright not installed."""
+    monkeypatch.setattr(core.shutil, "which", lambda x: None)
+    result = core._take_screenshot("https://example.com")
+    assert result == ""
+
+
+def test_take_screenshot_returns_empty_on_failure(monkeypatch):
+    """_take_screenshot returns '' when Playwright subprocess fails."""
+    monkeypatch.setattr(core.shutil, "which", lambda x: "/usr/bin/python3")
+
+    def mock_run(*args, **kwargs):
+        raise Exception("playwright not found")
+
+    monkeypatch.setattr(core.subprocess, "run", mock_run)
+    result = core._take_screenshot("https://example.com")
+    assert result == ""
+
+
+def test_fetch_result_includes_screenshot_path_in_dict():
+    """FetchResult.to_dict() includes screenshot_path when set."""
+    fr = core.FetchResult(
+        url="https://example.com",
+        ok=True,
+        screenshot_path="/tmp/shot.png",
+    )
+    d = fr.to_dict()
+    assert d["screenshot_path"] == "/tmp/shot.png"
+
+
+def test_fetch_result_omits_screenshot_when_empty():
+    """FetchResult.to_dict() omits screenshot_path when empty."""
+    fr = core.FetchResult(url="https://example.com", ok=True)
+    d = fr.to_dict()
+    assert d["screenshot_path"] == ""
+
+
+def test_fetch_url_takes_screenshot_when_requested(monkeypatch, tmp_path):
+    """fetch_url with take_screenshot=True calls _take_screenshot."""
+    shot_path = str(tmp_path / "shot.png")
+    Path(shot_path).write_bytes(b"png")
+
+    captured_url = []
+
+    def fake_take_screenshot(url, timeout=15):
+        captured_url.append(url)
+        return shot_path
+
+    monkeypatch.setattr(core, "_take_screenshot", fake_take_screenshot)
+
+    class FakeResp:
+        status_code = 200
+        encoding = "utf-8"
+        url = "https://example.com"
+        text = "<html><head><title>Test</title></head><body><p>Hello</p></body></html>"
+        headers = {"content-type": "text/html"}
+
+    monkeypatch.setattr(core.requests.Session, "get", lambda *a, **kw: FakeResp())
+
+    result = core.fetch_url("https://example.com", take_screenshot=True)
+    assert captured_url == ["https://example.com"]
+    assert result.screenshot_path == shot_path
+
+
+# ── Deep crawl tests ───────────────────────────────────────────────
+
+def test_crawl_bfs_stops_at_max_depth(monkeypatch, tmp_path):
+    """crawl BFS respects --depth and stops at boundary."""
+    import pathlib
+    fetched_urls = []
+
+    def fake_fetch(url, **kwargs):
+        fetched_urls.append(url)
+        depth = int(url.split("/page")[1]) if "/page" in url else 0
+        links = []
+        if depth < 3:
+            links = [{"url": f"https://example.com/page{depth+1}", "text": f"Page {depth+1}"}]
+        return core.FetchResult(
+            url=url, final_url=url, ok=True, status_code=200,
+            title=f"Page {url}", text=f"Content of {url}",
+            links=links,
+            tactics=["direct_http"],
+            source="direct_http",
+        )
+
+    monkeypatch.setattr(core, "fetch_url", fake_fetch)
+
+    result = core.crawl("https://example.com/page0", depth=2, max_pages=10, timeout=10)
+    assert result["status"] == "ok"
+    urls = [s["url"] for s in result["sources"]]
+    # depth 0, depth 1, depth 2 = 3 unique pages
+    assert len(urls) == 3
+    assert "https://example.com/page0" in urls
+    assert "https://example.com/page1" in urls
+    assert "https://example.com/page2" in urls
+    assert "https://example.com/page3" not in urls  # depth limit
+
+
+def test_crawl_stops_at_max_pages(monkeypatch):
+    """crawl respects --max-pages even when more reachable."""
+    fetched_urls = []
+
+    def fake_fetch(url, **kwargs):
+        fetched_urls.append(url)
+        return core.FetchResult(
+            url=url, final_url=url, ok=True, status_code=200,
+            title=url, text=f"Content of {url}",
+            links=[{"url": f"{url}/a", "text": "A"}, {"url": f"{url}/b", "text": "B"}],
+            tactics=["direct_http"], source="direct_http",
+        )
+
+    monkeypatch.setattr(core, "fetch_url", fake_fetch)
+
+    result = core.crawl("https://example.com", depth=5, max_pages=3, timeout=10)
+    assert len(result["sources"]) == 3
+
+
+def test_crawl_deduplicates_canonical_urls(monkeypatch):
+    """crawl skips already-seen canonical URLs."""
+    def fake_fetch(url, **kwargs):
+        return core.FetchResult(
+            url=url, final_url="https://example.com/canonical",  # all same canonical
+            ok=True, status_code=200,
+            title=url, text=f"Content of {url}",
+            links=[{"url": "https://example.com/other", "text": "Other"}],
+            tactics=["direct_http"], source="direct_http",
+        )
+
+    monkeypatch.setattr(core, "fetch_url", fake_fetch)
+    result = core.crawl("https://example.com", depth=2, max_pages=10, timeout=10)
+    assert len(result["sources"]) == 1  # deduped
+
+
+def test_crawl_skips_blocked_pages(monkeypatch):
+    """crawl skips blocked pages but continues crawling."""
+    calls = 0
+
+    def fake_fetch(url, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return core.FetchResult(
+                url=url, final_url=url, ok=True, status_code=200,
+                title="Root", text="Root content",
+                links=[{"url": "https://example.com/blocked", "text": "Blocked"},
+                       {"url": "https://example.com/ok", "text": "OK"}],
+                tactics=["direct_http"], source="direct_http",
+            )
+        elif "/blocked" in url:
+            return core.FetchResult(
+                url=url, final_url=url, ok=False, status_code=403,
+                title="Blocked", text="Just a moment...",
+                warnings=["blocker_or_login_wall"],
+            )
+        else:
+            return core.FetchResult(
+                url=url, final_url=url, ok=True, status_code=200,
+                title="OK", text="OK content",
+                links=[],
+                tactics=["direct_http"], source="direct_http",
+            )
+
+    monkeypatch.setattr(core, "fetch_url", fake_fetch)
+    result = core.crawl("https://example.com", depth=1, max_pages=10, timeout=10)
+    sources = result["sources"]
+    urls = [s["url"] for s in sources]
+    assert "https://example.com" in urls
+    assert "https://example.com/ok" in urls
+    assert "https://example.com/blocked" not in urls

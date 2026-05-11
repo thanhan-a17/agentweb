@@ -56,6 +56,7 @@ class FetchResult:
     tactics: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
+    screenshot_path: str = ""
 
     def quality_score(self) -> float:
         score = 0.0
@@ -98,6 +99,7 @@ class FetchResult:
             "warnings": self.warnings,
             "elapsed_ms": self.elapsed_ms,
             "quality_score": round(self.quality_score(), 3),
+            "screenshot_path": self.screenshot_path,
         }
 
 
@@ -352,6 +354,7 @@ def fetch_url(
     use_jina: bool = True,
     use_browser: bool = False,
     use_camoufox: bool = False,
+    take_screenshot: bool = False,
 ) -> FetchResult:
     start = time.monotonic()
     url = _safe_url(url)
@@ -425,6 +428,13 @@ def fetch_url(
     result.ok = bool(text) and not (result.status_code and result.status_code >= 500)
     result.source = tactics[-1] if tactics else "none"
     result.tactics = tactics
+    if take_screenshot:
+        shot = _take_screenshot(url, timeout=timeout)
+        if shot:
+            result.screenshot_path = shot
+            tactics.append("screenshot")
+        else:
+            warnings.append("screenshot_unavailable")
     result.warnings = sorted(set(warnings))
     result.elapsed_ms = int((time.monotonic() - start) * 1000)
     return _classify_fetch_result(result)
@@ -515,6 +525,51 @@ with Camoufox(headless=True, humanize=True) as browser:
     return ""
 
 
+def _take_screenshot(url: str, timeout: int = 15) -> str:
+    """Take a full-page screenshot using Playwright. Soft dependency — returns '' if missing."""
+    if not shutil.which("playwright"):
+        return ""
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".png", prefix="agentweb_screenshot_")
+    os.close(fd)
+    script = rf'''
+import sys
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sys.exit(2)
+url = sys.argv[1]
+output = sys.argv[2]
+timeout_ms = int(sys.argv[3]) * 1000
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    try:
+        page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+    except Exception:
+        pass
+    page.screenshot(path=output, full_page=True)
+    browser.close()
+'''
+    try:
+        proc = subprocess.run(
+            [shutil.which("python3") or "python3", "-c", script, url, path, str(timeout)],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 15,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if proc.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return ""
+
+
 def search_web(
     query: str,
     *,
@@ -586,7 +641,7 @@ def _select_search_services(query: str, services: list[str] | tuple[str, ...] | 
     subject_rules = [
         (("paper", "study", "journal", "doi", "citation", "scholar", "arxiv", "preprint", "research", "evidence"), {"openalex", "crossref", "arxiv"}),
         (("medicine", "medical", "clinical", "disease", "drug", "therapy", "trial", "pubmed", "biology", "genome"), {"pubmed", "openalex"}),
-        (("code", "github", "repository", "library", "sdk", "api", "package", "framework", "next.js", "nextjs", "hydration", "mismatch", "useeffect", "stackoverflow", "bug", "fix"), {"github", "hackernews"}),
+        (("code", "github", "repository", "library", "sdk", "api", "package", "framework", "next.js", "nextjs", "hydration", "mismatch", "useeffect", "stackoverflow", "bug", "fix"), {"github", "stackoverflow", "hackernews"}),
         (("startup", "product", "pricing", "saas", "company", "market", "competitor", "earnings", "revenue", "quarterly"), {"hackernews"}),
         (("history", "biography", "country", "city", "artist", "philosophy", "law", "policy"), {"wikipedia", "wikidata"}),
         (("archaeology", "ancient", "bronze age", "collapse"), {"wikipedia", "wikidata", "openalex", "crossref"}),
@@ -595,7 +650,7 @@ def _select_search_services(query: str, services: list[str] | tuple[str, ...] | 
         if any(term in q for term in terms):
             wanted.update(additions)
     # Keep the default pack broad without turning every query into a slow API carnival.
-    ordered = ["duckduckgo", "wikipedia", "wikidata", "openalex", "crossref", "arxiv", "pubmed", "github", "hackernews"]
+    ordered = ["duckduckgo", "wikipedia", "wikidata", "openalex", "crossref", "arxiv", "pubmed", "github", "stackoverflow", "hackernews"]
     return [registry[name] for name in ordered if name in wanted]
 
 
@@ -669,6 +724,7 @@ def _search_service_registry() -> dict[str, SearchService]:
         "arxiv": SearchService("arxiv", _search_arxiv, ("scholarly", "preprints", "science"), 0.8),
         "pubmed": SearchService("pubmed", _search_pubmed, ("medicine", "biology", "clinical"), 0.8),
         "github": SearchService("github", _search_github_repositories, ("software", "code"), 0.8),
+        "stackoverflow": SearchService("stackoverflow", _search_stackoverflow, ("software", "troubleshooting", "q&a"), 0.85),
         "hackernews": SearchService("hackernews", _search_hn_algolia, ("software", "startups", "tech"), 0.6),
     }
 
@@ -834,8 +890,10 @@ def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[
     items: list[SearchResult] = []
     if _looks_blocked(raw, getattr(resp, "status_code", None)):
         raw = ""
-    for block in re.findall(r'(?is)<div class="result results_links.*?</div>\s*</div>', raw):
-        href_match = re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
+    pattern = re.compile(r'(?is)<a\b(?P<attrs>[^>]*class=["\']result__a["\'][^>]*)>(?P<title>.*?)</a>(?P<tail>.*?)(?=<a\b[^>]*class=["\']result__a["\']|</body>|</html>|$)')
+    for match in pattern.finditer(raw):
+        attrs = match.group("attrs")
+        href_match = re.search(r'href=["\']([^"\']+)["\']', attrs, re.I)
         if not href_match:
             continue
         href = html.unescape(href_match.group(1))
@@ -846,10 +904,12 @@ def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[
         if _is_duckduckgo_ad_url(href):
             continue
         snippet = ""
-        sn = re.search(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', block)
+        sn = re.search(r'(?is)<a[^>]+class=["\']result__snippet["\'][^>]*>(.*?)</a>', match.group("tail"))
         if sn:
             snippet = _clean_text(_strip_html(sn.group(1)))
-        items.append(SearchResult(_clean_text(_strip_html(href_match.group(2))), href, snippet, "duckduckgo"))
+        title_text = _clean_text(_strip_html(match.group("title")))
+        if title_text and href:
+            items.append(SearchResult(title_text, href, snippet, "duckduckgo"))
         if len(items) >= max_results:
             break
     if not items:
@@ -905,7 +965,48 @@ def _is_duckduckgo_ad_url(url: str) -> bool:
         return False
     host = p.netloc.lower()
     qs = urllib.parse.parse_qs(p.query)
-    return host.endswith("duckduckgo.com") and (p.path.endswith("/y.js") or "ad_domain" in qs or "ad_provider" in qs)
+    return host.endswith("duckduckgo.com") and (
+        p.path.endswith("/y.js")
+        or p.path.startswith("/duckduckgo-help-pages/company/ads")
+        or "ad_domain" in qs
+        or "ad_provider" in qs
+    )
+
+
+def _stackoverflow_query(query: str) -> str:
+    terms = _query_terms(query)
+    preferred = [t for t in terms if t in {"next.js", "nextjs", "react", "hydration", "localstorage", "local-storage", "mismatch", "error"}]
+    if preferred:
+        return " ".join(preferred[:5])
+    return " ".join(terms[:6]) or query
+
+
+def _search_stackoverflow(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://api.stackexchange.com/2.3/search/advanced?" + urllib.parse.urlencode(
+        {
+            "order": "desc",
+            "sort": "relevance",
+            "site": "stackoverflow",
+            "q": _stackoverflow_query(query),
+            "pagesize": min(max_results, 5),
+            "filter": "default",
+        }
+    )
+    data = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout).json()
+    items: list[SearchResult] = []
+    for question in data.get("items", []):
+        link = question.get("link")
+        title = html.unescape(question.get("title") or "Stack Overflow question")
+        if not link:
+            continue
+        score = question.get("score", 0)
+        answers = question.get("answer_count", 0)
+        tags = ", ".join(question.get("tags", [])[:5])
+        snippet = f"{score} score, {answers} answers"
+        if tags:
+            snippet += f" — {tags}"
+        items.append(SearchResult(title, link, snippet, "stackoverflow"))
+    return items
 
 
 def _search_hn_algolia(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -932,6 +1033,7 @@ def research(
     timeout: int = 20,
     max_chars: int = 6000,
     use_camoufox: bool = True,
+    take_screenshot: bool = False,
     services: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     profile = infer_subject_profile(query, services)
@@ -942,7 +1044,7 @@ def research(
     fetched: list[FetchResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(search_results)))) as pool:
         fut_map = {
-            pool.submit(fetch_url, r.url, timeout=timeout, max_chars=max_chars, use_jina=True, use_camoufox=use_camoufox): r
+            pool.submit(fetch_url, r.url, timeout=timeout, max_chars=max_chars, use_jina=True, use_camoufox=use_camoufox, take_screenshot=take_screenshot): r
             for r in search_results
         }
         for fut in concurrent.futures.as_completed(fut_map):
@@ -953,6 +1055,8 @@ def research(
                 fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"fetch_failed:{exc}"]))
     fetched.sort(key=lambda r: r.quality_score(), reverse=True)
     usable = [r for r in fetched if r.ok and r.quality_score() >= 1.0]
+    if not usable:
+        usable = _snippet_sources(search_results)
     warnings = []
     status = "ok"
     if not search_results:
@@ -972,6 +1076,96 @@ def research(
         "rejected_sources": [r.to_dict(max_chars=1000) for r in fetched if r not in usable],
         "answer_pack": _answer_pack(query, usable),
     }
+
+
+def crawl(
+    seed_url: str,
+    *,
+    depth: int = 2,
+    max_pages: int = 10,
+    timeout: int = 20,
+    max_chars: int = 6000,
+    take_screenshot: bool = False,
+) -> dict[str, Any]:
+    """BFS crawl from a seed URL, reusing fetch_url for each page.
+
+    Returns the same dict shape as research() for consistent agent consumption.
+    """
+    from collections import deque
+
+    seed_url = _safe_url(seed_url)
+    visited: set[str] = set()
+    fetched: list[FetchResult] = []
+    queue: deque[tuple[str, int]] = deque([(seed_url, 0)])
+
+    while queue and len(fetched) < max_pages:
+        url, current_depth = queue.popleft()
+        canonical = _canonical_url(url)
+        if canonical in visited:
+            continue
+
+        try:
+            result = fetch_url(url, timeout=timeout, max_chars=max_chars, take_screenshot=take_screenshot)
+        except Exception:
+            visited.add(canonical)
+            continue
+
+        # Track both the requested URL and where we actually landed (handles redirects)
+        visited.add(canonical)
+        final_canonical = _canonical_url(result.final_url)
+        if final_canonical != canonical:
+            if final_canonical in visited:
+                continue  # redirect to already-seen page
+            visited.add(final_canonical)
+
+        if result.ok and result.quality_score() >= 0:
+            fetched.append(result)
+
+        # Enqueue child links if within depth limit
+        if current_depth < depth and len(fetched) < max_pages:
+            for link in result.links[:20]:  # cap links per page
+                child_canonical = _canonical_url(link.get("url", ""))
+                if child_canonical and child_canonical not in visited:
+                    queue.append((link["url"], current_depth + 1))
+
+    usable = [r for r in fetched if r.ok and r.quality_score() >= 1.0]
+    if not usable:
+        usable = [r for r in fetched if r.ok]
+
+    return {
+        "query": seed_url,
+        "generated_at": email.utils.formatdate(usegmt=True),
+        "status": "ok" if usable else "degraded",
+        "seed_url": seed_url,
+        "depth": depth,
+        "max_pages": max_pages,
+        "pages_fetched": len(fetched),
+        "warnings": [],
+        "sources": [r.to_dict(max_chars=max_chars) for r in usable],
+        "rejected_sources": [r.to_dict(max_chars=1000) for r in fetched if r not in usable],
+        "answer_pack": _answer_pack(seed_url, usable),
+    }
+
+
+def _snippet_sources(search_results: Iterable[SearchResult]) -> list[FetchResult]:
+    sources: list[FetchResult] = []
+    for result in search_results:
+        snippet = result.snippet.strip()
+        if len(snippet.split()) < 6:
+            continue
+        text = _clean_text(f"{result.title}. {snippet}")
+        sources.append(
+            FetchResult(
+                url=result.url,
+                final_url=result.url,
+                ok=True,
+                source="search_snippet",
+                title=result.title,
+                text=text,
+                warnings=["search_snippet_only_fetch_unavailable"],
+            )
+        )
+    return sources
 
 
 def _answer_pack(query: str, sources: Iterable[FetchResult]) -> dict[str, Any]:

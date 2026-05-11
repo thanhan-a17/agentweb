@@ -16,6 +16,7 @@ except ImportError:  # Editable CLI can be shadowed by Hermes' namespace path.
     except PackageNotFoundError:
         __version__ = "0.1.0"
 from .core import (
+    crawl,
     fetch_url,
     format_markdown_fetch,
     format_markdown_research,
@@ -75,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--no-jina", action="store_true", help="Disable Jina reader fallback.")
     f.add_argument("--camoufox", action="store_true", help="Try Camoufox browser fallback for bot-protected pages if installed.")
     f.add_argument("--browser", action="store_true", help="Try agent-browser snapshot fallback if installed.")
+    f.add_argument("--screenshot", action="store_true", help="Take a full-page screenshot of the fetched page.")
     f.add_argument("--format", choices=["json", "markdown"], default="json")
     f.add_argument("--output", "-o")
 
@@ -85,8 +87,19 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-chars", type=int, default=6000)
     r.add_argument("--service", action="append", help="Restrict discovery to a service; repeatable. Use 'all' for every service.")
     r.add_argument("--no-camoufox", action="store_true", help="Disable Camoufox fallback during source fetching.")
+    r.add_argument("--screenshot", action="store_true", help="Take screenshots of fetched source pages.")
     r.add_argument("--format", choices=["json", "markdown"], default="json")
     r.add_argument("--output", "-o")
+
+    c = sub.add_parser("crawl", help="BFS crawl from a seed URL: fetch pages, follow links, build an evidence pack.")
+    c.add_argument("url")
+    c.add_argument("--depth", type=int, default=2, help="How many link levels to follow (default: 2).")
+    c.add_argument("--max-pages", type=int, default=10, help="Maximum pages to fetch (default: 10).")
+    c.add_argument("--timeout", type=int, default=20)
+    c.add_argument("--max-chars", type=int, default=6000)
+    c.add_argument("--screenshot", action="store_true", help="Take screenshots of crawled pages.")
+    c.add_argument("--format", choices=["json", "markdown"], default="json")
+    c.add_argument("--output", "-o")
 
     return p
 
@@ -129,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 use_jina=not args.no_jina,
                 use_browser=args.browser,
                 use_camoufox=args.camoufox,
+                take_screenshot=args.screenshot,
             )
             if args.format == "markdown":
                 _emit(format_markdown_fetch(result, max_chars=args.max_chars), "text", args.output)
@@ -143,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 max_chars=args.max_chars,
                 use_camoufox=not args.no_camoufox,
+                take_screenshot=args.screenshot,
                 services=args.service,
             )
             if args.format == "markdown":
@@ -150,6 +165,21 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _emit(pack, "json", args.output)
             return 0
+
+        if args.command == "crawl":
+            pack = crawl(
+                args.url,
+                depth=args.depth,
+                max_pages=args.max_pages,
+                timeout=args.timeout,
+                max_chars=args.max_chars,
+                take_screenshot=args.screenshot,
+            )
+            if args.format == "markdown":
+                _emit(format_markdown_research(pack), "text", args.output)
+            else:
+                _emit(pack, "json", args.output)
+            return 0 if pack["status"] == "ok" else 2
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

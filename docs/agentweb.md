@@ -10,6 +10,7 @@ agentweb search "query" --service wikipedia --service wikidata
 agentweb services --format markdown
 agentweb fetch https://example.com --format markdown
 agentweb research "best local LLM serving stack" --max-results 6 --format json
+agentweb crawl https://docs.example.com --depth 3 --max-pages 20 --format json
 ```
 
 `AgentWeb` is also installed as an alias for `agentweb`.
@@ -26,6 +27,8 @@ agentweb research "best local LLM serving stack" --max-results 6 --format json
 - Supports logged-in pages with `--cookies` as either a raw Cookie header or Netscape `cookies.txt` path.
 - Optionally tries `agent-browser` snapshots with `--browser` when installed.
 - Optionally tries Camoufox browser rendering for bot-protected pages with `--camoufox` on `fetch`; `research` uses Camoufox fallback by default when installed, disable with `--no-camoufox`.
+- Optionally takes full-page screenshots with `--screenshot` on `fetch`, `research`, or `crawl`. Uses Playwright (soft dependency, no hard install required) — returns `screenshot_path` in output and gracefully warns `screenshot_unavailable` if Playwright is missing.
+- BF-crawls from a seed URL with `crawl` — follows links up to `--depth` levels, stops at `--max-pages`, deduplicates by canonical URL, and emits the same evidence-pack format as `research`.
 - Emits compact JSON/Markdown designed for LLM context, with warnings, rejected sources, and quality scores.
 
 ## Agent usage pattern
@@ -60,3 +63,17 @@ agentweb fetch https://app.example.com/dashboard --cookies ~/.cookies/example.tx
 ```
 
 AgentWeb does not bypass authentication. It uses credentials/cookies the user explicitly provides.
+
+Use `crawl` when the agent needs to explore a site's structure:
+
+```bash
+agentweb crawl https://docs.example.com --depth 2 --max-pages 15 --format json
+agentweb crawl https://docs.example.com --depth 1 --max-pages 5 --screenshot --format json
+```
+
+Use `--screenshot` on any fetch/crawl/research command for visual context:
+
+```bash
+agentweb fetch https://example.com --screenshot --format json
+agentweb research "new CSS features shipping in 2026" --screenshot --format json
+```
