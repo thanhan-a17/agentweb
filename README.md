@@ -23,3 +23,6 @@ Additional docs:
 - `docs/architecture.md` — components, service boundaries, data flows, and runtime responsibilities.
 - `docs/api.md` — SDK endpoint contracts, request/response schemas, status codes, and examples.
 - `docs/extensions.md` — examples for adding domains, agent roles, and tools/services.
+- `docs/quickstart.md` — install, local run, test commands, and expected output.
+- `docs/deployment.md` — production-like local/container deployment notes.
+- `docs/changelog.md` — release notes, migration steps, and known limitations.

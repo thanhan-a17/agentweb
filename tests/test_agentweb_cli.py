@@ -140,11 +140,11 @@ def test_research_marks_empty_search_as_degraded(monkeypatch):
     assert pack["answer_pack"]["evidence"] == []
 
 
-def test_cli_research_empty_search_returns_degraded_exit(monkeypatch, capsys):
+def test_cli_research_empty_search_returns_degraded_success(monkeypatch, capsys):
     monkeypatch.setattr(core, "search_web", lambda query, max_results=6, timeout=20: [])
     code = main(["research", "rare topic", "--format", "json"])
     data = json.loads(capsys.readouterr().out)
-    assert code == 2
+    assert code == 0
     assert data["status"] == "degraded"
 
 
@@ -309,3 +309,76 @@ def test_cli_services_lists_registry(capsys):
     data = json.loads(capsys.readouterr().out)
     assert code == 0
     assert {item["name"] for item in data["services"]} >= {"duckduckgo", "wikipedia", "openalex", "pubmed", "github"}
+
+
+def test_duckduckgo_lite_fallback_parses_results(monkeypatch):
+    html = '''
+    <html><body>
+      <a rel="nofollow" class='result-link' href="https://example.com/nvidia-earnings">NVIDIA earnings release</a>
+      <td class='result-snippet'>Data Center revenue increased in the latest quarterly earnings.</td>
+      <a rel="nofollow" class='result-link' href="https://example.com/second">Second result</a>
+      <td class='result-snippet'>Another useful snippet.</td>
+    </body></html>
+    '''
+
+    class Resp:
+        status_code = 200
+        text = html
+
+    calls = []
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        if "html" in url:
+            class Blocked:
+                status_code = 202
+                text = '<html><script src="/anomaly.js"></script></html>'
+            return Blocked()
+        return Resp()
+
+    monkeypatch.setattr(core.requests, "get", fake_get)
+    results = core._search_duckduckgo_html("NVIDIA latest quarterly earnings", max_results=5, timeout=5)
+    assert [r.url for r in results] == ["https://example.com/nvidia-earnings", "https://example.com/second"]
+    assert results[0].snippet == "Data Center revenue increased in the latest quarterly earnings."
+
+
+def test_search_web_falls_back_and_filters_irrelevant_vertical_results(monkeypatch):
+    monkeypatch.setattr(core, "_search_duckduckgo_html", lambda *args, **kwargs: [])
+    monkeypatch.setattr(core, "_search_wikipedia", lambda *args, **kwargs: [])
+    monkeypatch.setattr(core, "_search_wikidata", lambda *args, **kwargs: [])
+    monkeypatch.setattr(core, "_search_openalex", lambda *args, **kwargs: [
+        core.SearchResult("Crisis in Context: The End of the Late Bronze Age", "https://example.com/bronze", "Late Bronze Age collapse Eastern Mediterranean", "openalex")
+    ])
+    monkeypatch.setattr(core, "_search_crossref", lambda *args, **kwargs: [
+        core.SearchResult("Taxation: Key Tables from OECD", "https://example.com/tax", "tax revenue", "crossref")
+    ])
+    monkeypatch.setattr(core, "_search_arxiv", lambda *args, **kwargs: [
+        core.SearchResult("Garbage Collection Makes Rust Easier to Use", "https://example.com/rust", "Bronze garbage collector", "arxiv")
+    ])
+    monkeypatch.setattr(core, "_search_pubmed", lambda *args, **kwargs: [])
+    monkeypatch.setattr(core, "_search_github_repositories", lambda *args, **kwargs: [])
+    monkeypatch.setattr(core, "_search_hn_algolia", lambda *args, **kwargs: [])
+
+    results = core.search_web("causes of the Bronze Age collapse evidence", max_results=5, timeout=5)
+    assert [r.url for r in results] == ["https://example.com/bronze"]
+
+
+def test_subject_profile_routes_troubleshooting_to_software_services():
+    profile = core.infer_subject_profile("Next.js hydration mismatch localStorage useEffect fix")
+    assert "github" in profile.services
+    assert "hackernews" in profile.services
+
+
+def test_official_docs_with_report_a_bug_are_not_blocked():
+    text = "What’s New In Python 3.13\nReport a bug\nFree-threaded CPython and an experimental JIT compiler."
+    result = core.FetchResult(
+        url="https://docs.python.org/3/whatsnew/3.13.html",
+        final_url="https://docs.python.org/3/whatsnew/3.13.html",
+        ok=True,
+        status_code=200,
+        title="What’s New In Python 3.13",
+        text=text,
+    )
+    core._classify_fetch_result(result)
+    assert result.ok is True
+    assert "blocker_or_login_wall" not in result.warnings

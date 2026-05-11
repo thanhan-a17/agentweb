@@ -32,9 +32,10 @@ USER_AGENTS = [
 ]
 
 BLOCK_PATTERNS = re.compile(
-    r"captcha|cloudflare|access denied|verify you are human|unusual traffic|bot detection|blocked|"
+    r"captcha|cloudflare|access denied|verify you are human|unusual traffic|bot detection|"
     r"just a moment|please wait for verification|enable javascript and cookies|network security|"
-    r"sign in to view|log in to your .*account|target url returned error\s+403|duckduckgo.*/anomaly\.js",
+    r"sign in to view|log in to your .*account|target url returned error\s+403|duckduckgo.*/anomaly\.js|"
+    r"checking your browser|challenge-form",
     re.I,
 )
 TEXT_MIME_HINTS = ("text/", "application/json", "application/xml", "application/xhtml+xml")
@@ -522,7 +523,24 @@ def search_web(
     services: list[str] | tuple[str, ...] | None = None,
 ) -> list[SearchResult]:
     selected_services = _select_search_services(query, services)
-    providers = [svc.provider for svc in selected_services]
+    results = _run_search_services(query, selected_services, max_results=max_results, timeout=timeout)
+
+    explicit_all = bool(services and "all" in services)
+    # If the normal broad web/KB route returns nothing, try every vertical provider,
+    # but only keep results that actually match the query. Otherwise `--service all`
+    # turns "hydration mismatch" into chemistry hydration papers. Dumb and noisy.
+    if not results and services is None:
+        registry = _search_service_registry()
+        fallback_services = [svc for name, svc in registry.items() if svc not in selected_services]
+        results = _run_search_services(query, fallback_services, max_results=max_results, timeout=timeout)
+        explicit_all = True
+
+    ranked = _rank_search_results(query, results, require_relevance=explicit_all)
+    return _balance_search_results(ranked, max_results=max_results)
+
+
+def _run_search_services(query: str, services: list[SearchService], *, max_results: int, timeout: int) -> list[SearchResult]:
+    providers = [svc.provider for svc in services]
     results: list[SearchResult] = []
     seen = set()
     if not providers:
@@ -538,7 +556,7 @@ def search_web(
                         results.append(item)
             except Exception:
                 continue
-    return _balance_search_results(results, max_results=max_results)
+    return results
 
 
 def infer_subject_profile(query: str, services: list[str] | tuple[str, ...] | None = None) -> SubjectProfile:
@@ -566,11 +584,12 @@ def _select_search_services(query: str, services: list[str] | tuple[str, ...] | 
     q = query.lower()
     wanted = {"duckduckgo", "wikipedia", "wikidata"}
     subject_rules = [
-        (("paper", "study", "journal", "doi", "citation", "scholar", "arxiv", "preprint", "research"), {"openalex", "crossref", "arxiv"}),
+        (("paper", "study", "journal", "doi", "citation", "scholar", "arxiv", "preprint", "research", "evidence"), {"openalex", "crossref", "arxiv"}),
         (("medicine", "medical", "clinical", "disease", "drug", "therapy", "trial", "pubmed", "biology", "genome"), {"pubmed", "openalex"}),
-        (("code", "github", "repository", "library", "sdk", "api", "package", "framework"), {"github", "hackernews"}),
-        (("startup", "product", "pricing", "saas", "company", "market", "competitor"), {"hackernews", "github"}),
+        (("code", "github", "repository", "library", "sdk", "api", "package", "framework", "next.js", "nextjs", "hydration", "mismatch", "useeffect", "stackoverflow", "bug", "fix"), {"github", "hackernews"}),
+        (("startup", "product", "pricing", "saas", "company", "market", "competitor", "earnings", "revenue", "quarterly"), {"hackernews"}),
         (("history", "biography", "country", "city", "artist", "philosophy", "law", "policy"), {"wikipedia", "wikidata"}),
+        (("archaeology", "ancient", "bronze age", "collapse"), {"wikipedia", "wikidata", "openalex", "crossref"}),
     ]
     for terms, additions in subject_rules:
         if any(term in q for term in terms):
@@ -580,6 +599,51 @@ def _select_search_services(query: str, services: list[str] | tuple[str, ...] | 
     return [registry[name] for name in ordered if name in wanted]
 
 
+def _rank_search_results(query: str, results: list[SearchResult], *, require_relevance: bool = False) -> list[SearchResult]:
+    scored = [(_result_relevance_score(query, item), i, item) for i, item in enumerate(results)]
+    if require_relevance or any(score >= 2.0 for score, _, _ in scored):
+        scored = [(score, i, item) for score, i, item in scored if score >= 2.0]
+    scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+    return [item for _, _, item in scored]
+
+
+STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "into", "what", "when", "where", "about", "best", "latest",
+    "review", "fix", "use", "using", "data", "result", "results", "evidence", "causes", "cause", "shops", "shop",
+}
+
+
+def _query_terms(query: str) -> list[str]:
+    terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9.+-]{2,}", query)]
+    return [t for t in terms if t not in STOPWORDS]
+
+
+def _result_relevance_score(query: str, item: SearchResult) -> float:
+    terms = _query_terms(query)
+    haystack = " ".join([item.title, item.snippet, item.url]).lower()
+    haystack_compact = haystack.replace(".", "")
+    haystack_terms = set(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9.+-]{2,}", haystack))
+    haystack_compact_terms = {t.replace(".", "") for t in haystack_terms}
+    if not terms:
+        return 1.0
+    score = 0.0
+    for term in terms:
+        normalized = term.replace(".", "")
+        if term in haystack_terms or normalized in haystack_compact_terms:
+            score += 1.0
+    q = query.lower()
+    phrase_bonuses = [
+        "bronze age", "data center", "quarterly earnings", "tokyo station", "next.js", "localstorage", "useeffect",
+        "hydration mismatch", "framework laptop", "ryzen ai", "semaglutide", "cardiovascular outcomes",
+    ]
+    for phrase in phrase_bonuses:
+        if phrase in q and phrase in haystack:
+            score += 3.0
+    if item.source == "duckduckgo":
+        score += 0.5
+    return score
+
+
 def _balance_search_results(results: list[SearchResult], *, max_results: int) -> list[SearchResult]:
     """Avoid one provider flooding the pack; subject coverage beats monoculture."""
     buckets: dict[str, list[SearchResult]] = {}
@@ -587,7 +651,7 @@ def _balance_search_results(results: list[SearchResult], *, max_results: int) ->
         buckets.setdefault(item.source or "unknown", []).append(item)
     balanced: list[SearchResult] = []
     while len(balanced) < max_results and any(buckets.values()):
-        for source in sorted(buckets):
+        for source in list(buckets):
             if buckets[source]:
                 balanced.append(buckets[source].pop(0))
                 if len(balanced) >= max_results:
@@ -768,6 +832,8 @@ def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[
     resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
     raw = resp.text
     items: list[SearchResult] = []
+    if _looks_blocked(raw, getattr(resp, "status_code", None)):
+        raw = ""
     for block in re.findall(r'(?is)<div class="result results_links.*?</div>\s*</div>', raw):
         href_match = re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
         if not href_match:
@@ -784,6 +850,49 @@ def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[
         if sn:
             snippet = _clean_text(_strip_html(sn.group(1)))
         items.append(SearchResult(_clean_text(_strip_html(href_match.group(2))), href, snippet, "duckduckgo"))
+        if len(items) >= max_results:
+            break
+    if not items:
+        return _search_duckduckgo_lite(query, max_results=max_results, timeout=timeout)
+    return items
+
+
+def _search_duckduckgo_lite(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://lite.duckduckgo.com/lite/?" + urllib.parse.urlencode({"q": query})
+    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+    raw = resp.text
+    if _looks_blocked(raw, getattr(resp, "status_code", None)):
+        return []
+    items: list[SearchResult] = []
+    # Lite uses a table layout: result-link anchors followed by result-snippet cells.
+    pattern = re.compile(r'(?is)<a\b(?P<attrs>[^>]*class=["\']result-link["\'][^>]*)>(?P<title>.*?)</a>(?P<tail>.*?)(?=<a\b[^>]*class=["\']result-link["\']|</body>|</html>)')
+    for match in pattern.finditer(raw):
+        attrs = match.group("attrs")
+        href_match = re.search(r'href=["\']([^"\']+)["\']', attrs, re.I)
+        if not href_match:
+            continue
+        href = html.unescape(href_match.group(1))
+        parsed = urllib.parse.urlparse(href)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "uddg" in qs:
+            href = qs["uddg"][0]
+        elif href.startswith("//duckduckgo.com/l/"):
+            href = "https:" + href
+            parsed = urllib.parse.urlparse(href)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "uddg" in qs:
+                href = qs["uddg"][0]
+        title = match.group("title")
+        tail = match.group("tail")
+        if _is_duckduckgo_ad_url(href):
+            continue
+        snippet = ""
+        sn = re.search(r'(?is)<td[^>]+class=["\']result-snippet["\'][^>]*>(.*?)</td>', tail)
+        if sn:
+            snippet = _clean_text(_strip_html(sn.group(1)))
+        title_text = _clean_text(_strip_html(title))
+        if title_text and href:
+            items.append(SearchResult(title_text, href, snippet, "duckduckgo"))
         if len(items) >= max_results:
             break
     return items

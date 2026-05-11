@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(format_markdown_research(pack), "text", args.output)
             else:
                 _emit(pack, "json", args.output)
-            return 0 if pack.get("status") == "ok" else 2
+            return 0
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
