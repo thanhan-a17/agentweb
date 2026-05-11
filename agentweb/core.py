@@ -640,7 +640,7 @@ def _select_search_services(query: str, services: list[str] | tuple[str, ...] | 
     wanted = {"duckduckgo", "wikipedia", "wikidata"}
     subject_rules = [
         (("paper", "study", "journal", "doi", "citation", "scholar", "arxiv", "preprint", "research", "evidence"), {"openalex", "crossref", "arxiv"}),
-        (("medicine", "medical", "clinical", "disease", "drug", "therapy", "trial", "pubmed", "biology", "genome"), {"pubmed", "openalex"}),
+        (("medicine", "medical", "clinical", "disease", "drug", "therapy", "trial", "trial result", "patient", "pubmed", "biology", "genome"), {"pubmed", "openalex", "clinicaltrials"}),
         (("code", "github", "repository", "library", "sdk", "api", "package", "framework", "next.js", "nextjs", "hydration", "mismatch", "useeffect", "stackoverflow", "bug", "fix"), {"github", "stackoverflow", "hackernews"}),
         (("startup", "product", "pricing", "saas", "company", "market", "competitor", "earnings", "revenue", "quarterly"), {"hackernews"}),
         (("history", "biography", "country", "city", "artist", "philosophy", "law", "policy"), {"wikipedia", "wikidata"}),
@@ -650,16 +650,65 @@ def _select_search_services(query: str, services: list[str] | tuple[str, ...] | 
         if any(term in q for term in terms):
             wanted.update(additions)
     # Keep the default pack broad without turning every query into a slow API carnival.
-    ordered = ["duckduckgo", "wikipedia", "wikidata", "openalex", "crossref", "arxiv", "pubmed", "github", "stackoverflow", "hackernews"]
+    ordered = ["duckduckgo", "wikipedia", "wikidata", "openalex", "crossref", "arxiv", "pubmed", "clinicaltrials", "github", "stackoverflow", "hackernews"]
     return [registry[name] for name in ordered if name in wanted]
 
 
 def _rank_search_results(query: str, results: list[SearchResult], *, require_relevance: bool = False) -> list[SearchResult]:
+    query_year = _extract_query_year(query)
     scored = [(_result_relevance_score(query, item), i, item) for i, item in enumerate(results)]
+    # Apply freshness penalty: if query mentions a year and result is older, penalize
+    if query_year:
+        scored = [
+            (score + _freshness_bonus(item, query_year), i, item)
+            for score, i, item in scored
+        ]
     if require_relevance or any(score >= 2.0 for score, _, _ in scored):
         scored = [(score, i, item) for score, i, item in scored if score >= 2.0]
     scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
     return [item for _, _, item in scored]
+
+
+def _extract_query_year(query: str) -> int | None:
+    """Extract a 4-digit year from the query, if present."""
+    years = [int(m) for m in re.findall(r"\b(20\d{2})\b", query)]
+    if years:
+        return max(years)
+    return None
+
+
+def _extract_result_year(item: SearchResult) -> int | None:
+    """Try to extract a publication year from a search result's title/snippet."""
+    haystack = f"{item.title} {item.snippet}"
+    years = [int(m) for m in re.findall(r"\b(20\d{2})\b", haystack)]
+    if years:
+        return min(years) if len(years) > 1 else years[0]
+    return None
+
+
+def _freshness_bonus(item: SearchResult, query_year: int) -> float:
+    """Return a bonus/penalty based on how well the result matches the query's temporal intent.
+
+    +2.0 for results from the exact year queried
+    +1.0 for results within 1 year
+    0 for results within 2 years
+    -2.0 for results 3+ years older than query year
+    -5.0 for results 5+ years older (likely stale)
+    """
+    result_year = _extract_result_year(item)
+    if result_year is None:
+        return 0.0  # no year info, no penalty
+    diff = query_year - result_year
+    if diff == 0:
+        return 2.0
+    elif diff <= 1:
+        return 1.0
+    elif diff <= 2:
+        return 0.0
+    elif diff <= 4:
+        return -2.0
+    else:
+        return -5.0
 
 
 STOPWORDS = {
@@ -723,9 +772,11 @@ def _search_service_registry() -> dict[str, SearchService]:
         "crossref": SearchService("crossref", _search_crossref, ("scholarly", "citation"), 0.8),
         "arxiv": SearchService("arxiv", _search_arxiv, ("scholarly", "preprints", "science"), 0.8),
         "pubmed": SearchService("pubmed", _search_pubmed, ("medicine", "biology", "clinical"), 0.8),
+        "clinicaltrials": SearchService("clinicaltrials", _search_clinicaltrials, ("medicine", "clinical", "trials"), 0.85),
         "github": SearchService("github", _search_github_repositories, ("software", "code"), 0.8),
         "stackoverflow": SearchService("stackoverflow", _search_stackoverflow, ("software", "troubleshooting", "q&a"), 0.85),
         "hackernews": SearchService("hackernews", _search_hn_algolia, ("software", "startups", "tech"), 0.6),
+        "bing": SearchService("bing", _search_bing, ("general",), 0.5),
     }
 
 
@@ -752,8 +803,13 @@ def _search_openalex(query: str, max_results: int, timeout: int) -> list[SearchR
     url = "https://api.openalex.org/works?" + urllib.parse.urlencode(
         {"search": query, "per-page": min(max_results, 5), "select": "title,doi,publication_year,authorships,primary_location"}
     )
-    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
-    data = resp.json()
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
     items: list[SearchResult] = []
     for work in data.get("results", []):
         title = work.get("title") or "OpenAlex result"
@@ -860,11 +916,57 @@ def _search_wikidata(query: str, max_results: int, timeout: int) -> list[SearchR
     return items
 
 
+def _search_clinicaltrials(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search ClinicalTrials.gov v2 REST API for clinical studies.
+
+    Returns directly relevant trial results with status, conditions, and dates.
+    """
+    url = "https://clinicaltrials.gov/api/v2/studies?" + urllib.parse.urlencode(
+        {
+            "query.term": query,
+            "pageSize": min(max_results, 5),
+            "format": "json",
+        }
+    )
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+        data = resp.json()
+    except Exception:
+        return []
+    items: list[SearchResult] = []
+    for study in data.get("studies", []):
+        protocol = study.get("protocolSection", {})
+        id_module = protocol.get("identificationModule", {})
+        title = id_module.get("briefTitle") or "Clinical trial"
+        nct_id = id_module.get("nctId") or ""
+        if not nct_id:
+            continue
+        status_module = protocol.get("statusModule", {})
+        status = status_module.get("overallStatus") or ""
+        conditions_module = protocol.get("conditionsModule", {})
+        conditions = ", ".join(conditions_module.get("conditions", []) or [])
+        date = ""
+        try:
+            date = (status_module.get("lastUpdatePostDate") or "").split("T")[0]
+        except Exception:
+            pass
+        snippet = ", ".join(filter(None, [status, date, conditions]))
+        link = f"https://clinicaltrials.gov/study/{nct_id}"
+        items.append(SearchResult(title, link, snippet, "clinicaltrials"))
+    return items
+
+
 def _search_github_repositories(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     url = "https://api.github.com/search/repositories?" + urllib.parse.urlencode(
         {"q": query, "sort": "stars", "order": "desc", "per_page": min(max_results, 5)}
     )
-    data = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout).json()
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0], "Accept": "application/vnd.github.v3+json"}, timeout=timeout)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
     items = []
     for repo in data.get("items", []):
         full_name = repo.get("full_name") or "GitHub repository"
@@ -880,6 +982,47 @@ def _search_github_repositories(query: str, max_results: int, timeout: int) -> l
         if description:
             snippet += f" — {description[:220]}"
         items.append(SearchResult(full_name, html_url, snippet, "github"))
+    return items
+
+
+def _search_bing(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Fallback general web search via Bing HTML scraping.
+
+    Used when DuckDuckGo is blocked/rate-limited. Bing is more lenient
+    with programmatic requests and returns clean organic results.
+    """
+    url = "https://www.bing.com/search?" + urllib.parse.urlencode(
+        {"q": query, "count": min(max_results, 10)}
+    )
+    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+    raw = resp.text
+    if _looks_blocked(raw, resp.status_code):
+        return []
+    # Bing uses <li class="b_algo"> for organic results
+    items: list[SearchResult] = []
+    # Match each result block
+    for match in re.finditer(r'(?is)<li\b[^>]*class=[\"\'][^\"\']*b_algo[^\"\']*[\"\'][^>]*>(.*?)</li>', raw):
+        block = match.group(1)
+        # Extract title and href
+        link_match = re.search(r'(?is)<a\b[^>]*href=[\"\'](https?://[^\"\']+)[\"\'][^>]*>(.*?)</a>', block)
+        if not link_match:
+            continue
+        href = html.unescape(link_match.group(1))
+        title_text = _clean_text(_strip_html(link_match.group(2)))
+        if not title_text or not href:
+            continue
+        # Extract snippet from <p> or <div class="b_caption">
+        snippet = ""
+        sn = re.search(r'(?is)<p[^>]*>(.*?)</p>', block)
+        if sn:
+            snippet = _clean_text(_strip_html(sn.group(1)))
+        if not snippet:
+            sn = re.search(r'(?is)<div\b[^>]*class=[\"\']b_caption[\"\'][^>]*>(.*?)</div>', block)
+            if sn:
+                snippet = _clean_text(_strip_html(sn.group(1)))
+        items.append(SearchResult(title_text, href, snippet, "bing"))
+        if len(items) >= max_results:
+            break
     return items
 
 
@@ -913,7 +1056,11 @@ def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[
         if len(items) >= max_results:
             break
     if not items:
-        return _search_duckduckgo_lite(query, max_results=max_results, timeout=timeout)
+        lite = _search_duckduckgo_lite(query, max_results=max_results, timeout=timeout)
+        if lite:
+            return lite
+        # Last resort: try Bing when both DDG endpoints are blocked
+        return _search_bing(query, max_results=max_results, timeout=timeout)
     return items
 
 
@@ -974,11 +1121,15 @@ def _is_duckduckgo_ad_url(url: str) -> bool:
 
 
 def _stackoverflow_query(query: str) -> str:
+    """Build a SO query that preserves semantic terms and strips years (SO has no future-dated Q&A)."""
     terms = _query_terms(query)
-    preferred = [t for t in terms if t in {"next.js", "nextjs", "react", "hydration", "localstorage", "local-storage", "mismatch", "error"}]
-    if preferred:
-        return " ".join(preferred[:5])
-    return " ".join(terms[:6]) or query
+    if not terms:
+        return query
+    # Strip year numbers — SO questions don't carry future-year tags
+    terms = [t for t in terms if not re.match(r"^20\d{2}$", t)]
+    if not terms:
+        return query
+    return " ".join(terms[:10]) or query
 
 
 def _search_stackoverflow(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -1035,24 +1186,45 @@ def research(
     use_camoufox: bool = True,
     take_screenshot: bool = False,
     services: list[str] | tuple[str, ...] | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
-    profile = infer_subject_profile(query, services)
+    subject_profile = infer_subject_profile(query, services)
     if services is None:
         search_results = search_web(query, max_results=max_results, timeout=timeout)
     else:
         search_results = search_web(query, max_results=max_results, timeout=timeout, services=services)
     fetched: list[FetchResult] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(search_results)))) as pool:
-        fut_map = {
-            pool.submit(fetch_url, r.url, timeout=timeout, max_chars=max_chars, use_jina=True, use_camoufox=use_camoufox, take_screenshot=take_screenshot): r
-            for r in search_results
-        }
-        for fut in concurrent.futures.as_completed(fut_map):
-            try:
-                fetched.append(fut.result())
-            except Exception as exc:
-                sr = fut_map[fut]
-                fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"fetch_failed:{exc}"]))
+    if profile:
+        from .auth_profile import fetch_with_profile
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(search_results)))) as pool:
+            fut_map = {
+                pool.submit(fetch_with_profile, r.url, profile_name=profile, timeout=timeout): r
+                for r in search_results
+            }
+            for fut in concurrent.futures.as_completed(fut_map):
+                try:
+                    text = fut.result()
+                    sr = fut_map[fut]
+                    if text:
+                        fetched.append(FetchResult(url=sr.url, ok=True, text=text[:max_chars], source="authenticated_browser"))
+                    else:
+                        fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=["authenticated_fetch_failed"]))
+                except Exception as exc:
+                    sr = fut_map[fut]
+                    fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"authenticated_fetch_failed:{exc}"]))
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(search_results)))) as pool:
+            fut_map = {
+                pool.submit(fetch_url, r.url, timeout=timeout, max_chars=max_chars, use_jina=True, use_camoufox=use_camoufox, take_screenshot=take_screenshot): r
+                for r in search_results
+            }
+            for fut in concurrent.futures.as_completed(fut_map):
+                try:
+                    fetched.append(fut.result())
+                except Exception as exc:
+                    sr = fut_map[fut]
+                    fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"fetch_failed:{exc}"]))
     fetched.sort(key=lambda r: r.quality_score(), reverse=True)
     usable = [r for r in fetched if r.ok and r.quality_score() >= 1.0]
     if not usable:
@@ -1069,7 +1241,7 @@ def research(
         "query": query,
         "generated_at": email.utils.formatdate(usegmt=True),
         "status": status,
-        "subject_profile": profile.to_dict(),
+        "subject_profile": subject_profile.to_dict(),
         "warnings": warnings,
         "search_results": [r.to_dict() for r in search_results],
         "sources": [r.to_dict(max_chars=max_chars) for r in usable],
