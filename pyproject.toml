@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentweb"
+version = "0.1.0"
+description = "Web access CLI for AI agents: search, fetch, extract, and source-pack."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Nous Research" }]
+license = { text = "MIT" }
+dependencies = [
+  "requests>=2.33.0,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0.2,<10"]
+
+[project.scripts]
+agentweb = "agentweb.cli:main"
+AgentWeb = "agentweb.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentweb", "agentweb.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
