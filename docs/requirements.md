@@ -30,6 +30,7 @@ AgentWeb currently provides:
 - Fetch extraction for HTML, metadata, JSON-LD, links, Next.js/RSC payloads, Jina Reader fallback, and optional browser/Camoufox fallback.
 - Research evidence packs with source quality checks and rejected-source reporting.
 - A mechanics module with agent definitions, execution policies, tool/service specs, schema validation, permission enforcement, and tool invocation.
+- A versioned SQLite persistence module for agent definitions, task state, tool call records, and audit logs.
 
 ## Target capabilities
 

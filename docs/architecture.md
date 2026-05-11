@@ -52,6 +52,21 @@ Primary data objects:
 - `ToolSpec`
 - `ToolRegistry`
 
+### Persistence layer: `agentweb/storage.py`
+
+Responsibilities:
+
+- initialize a versioned SQLite schema
+- persist agent definitions
+- persist task status and final result data
+- persist tool call records
+- persist audit logs with timestamp, actor, action, target, result, and request/correlation ID
+
+Primary data objects:
+
+- `AgentWebStore`
+- `SCHEMA_VERSION`
+
 ### Tests: `tests/`
 
 Responsibilities:
@@ -125,6 +140,14 @@ Optional fetch fallbacks:
 4. Input payload is validated before handler execution.
 5. Handler executes.
 6. Output is validated before returning to the caller.
+
+### Persistence operations
+
+1. `AgentWebStore.initialize()` creates the SQLite schema and records the schema version.
+2. `save_agent()` persists serialized agent definitions and writes an `agent.save` audit event.
+3. `upsert_task()` records queued/running/completed task state and writes a `task.upsert` audit event.
+4. `record_tool_call()` records tool inputs, outputs, status, elapsed time, and writes a `tool.invoke` audit event.
+5. Audit records include timestamp, actor, action, target, result, request ID, and JSON details.
 
 ## External dependencies
 
