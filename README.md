@@ -10,6 +10,8 @@ agentweb --version
 agentweb fetch https://example.com --format markdown
 agentweb search "Ada Lovelace biography" --max-results 5
 agentweb research "sparse autoencoders interpretability" --format json
+agentweb services --format markdown
+agentweb search "clinical trial metformin aging" --service pubmed --service openalex
 agentweb fetch https://example.com/protected --camoufox --format markdown
 ```
 

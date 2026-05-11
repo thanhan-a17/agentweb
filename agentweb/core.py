@@ -17,10 +17,11 @@ import shutil
 import subprocess
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import requests
 
@@ -108,6 +109,30 @@ class SearchResult:
 
     def to_dict(self) -> dict[str, str]:
         return {"title": self.title, "url": self.url, "snippet": self.snippet, "source": self.source}
+
+
+SearchProvider = Callable[[str, int, int], list[SearchResult]]
+
+
+@dataclass(frozen=True)
+class SearchService:
+    """A no-key discovery service with a subject-matter bias."""
+
+    name: str
+    provider: SearchProvider
+    subjects: tuple[str, ...] = ("general",)
+    weight: float = 1.0
+
+
+@dataclass(frozen=True)
+class SubjectProfile:
+    """Lightweight query routing so research is not tech/web-only."""
+
+    subjects: tuple[str, ...]
+    services: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"subjects": list(self.subjects), "services": list(self.services)}
 
 
 def _session(timeout: int = 20, cookies: str | None = None, headers: dict[str, str] | None = None) -> requests.Session:
@@ -489,10 +514,19 @@ with Camoufox(headless=True, humanize=True) as browser:
     return ""
 
 
-def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
-    providers = [_search_duckduckgo_html, _search_wikipedia, _search_openalex, _search_hn_algolia]
+def search_web(
+    query: str,
+    *,
+    max_results: int = 8,
+    timeout: int = 20,
+    services: list[str] | tuple[str, ...] | None = None,
+) -> list[SearchResult]:
+    selected_services = _select_search_services(query, services)
+    providers = [svc.provider for svc in selected_services]
     results: list[SearchResult] = []
     seen = set()
+    if not providers:
+        return []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
         futs = [pool.submit(p, query, max_results, timeout) for p in providers]
         for fut in concurrent.futures.as_completed(futs):
@@ -504,7 +538,82 @@ def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[S
                         results.append(item)
             except Exception:
                 continue
-    return results[:max_results]
+    return _balance_search_results(results, max_results=max_results)
+
+
+def infer_subject_profile(query: str, services: list[str] | tuple[str, ...] | None = None) -> SubjectProfile:
+    selected = _select_search_services(query, services)
+    subjects = []
+    for svc in selected:
+        for subject in svc.subjects:
+            if subject not in subjects:
+                subjects.append(subject)
+    return SubjectProfile(subjects=tuple(subjects or ["general"]), services=tuple(svc.name for svc in selected))
+
+
+def _select_search_services(query: str, services: list[str] | tuple[str, ...] | None = None) -> list[SearchService]:
+    registry = _search_service_registry()
+    if services:
+        selected: list[SearchService] = []
+        for name in services:
+            if name == "all":
+                return list(registry.values())
+            if name not in registry:
+                raise ValueError(f"Unknown search service {name!r}. Available: {', '.join(registry)}")
+            selected.append(registry[name])
+        return selected
+
+    q = query.lower()
+    wanted = {"duckduckgo", "wikipedia", "wikidata"}
+    subject_rules = [
+        (("paper", "study", "journal", "doi", "citation", "scholar", "arxiv", "preprint", "research"), {"openalex", "crossref", "arxiv"}),
+        (("medicine", "medical", "clinical", "disease", "drug", "therapy", "trial", "pubmed", "biology", "genome"), {"pubmed", "openalex"}),
+        (("code", "github", "repository", "library", "sdk", "api", "package", "framework"), {"github", "hackernews"}),
+        (("startup", "product", "pricing", "saas", "company", "market", "competitor"), {"hackernews", "github"}),
+        (("history", "biography", "country", "city", "artist", "philosophy", "law", "policy"), {"wikipedia", "wikidata"}),
+    ]
+    for terms, additions in subject_rules:
+        if any(term in q for term in terms):
+            wanted.update(additions)
+    # Keep the default pack broad without turning every query into a slow API carnival.
+    ordered = ["duckduckgo", "wikipedia", "wikidata", "openalex", "crossref", "arxiv", "pubmed", "github", "hackernews"]
+    return [registry[name] for name in ordered if name in wanted]
+
+
+def _balance_search_results(results: list[SearchResult], *, max_results: int) -> list[SearchResult]:
+    """Avoid one provider flooding the pack; subject coverage beats monoculture."""
+    buckets: dict[str, list[SearchResult]] = {}
+    for item in results:
+        buckets.setdefault(item.source or "unknown", []).append(item)
+    balanced: list[SearchResult] = []
+    while len(balanced) < max_results and any(buckets.values()):
+        for source in sorted(buckets):
+            if buckets[source]:
+                balanced.append(buckets[source].pop(0))
+                if len(balanced) >= max_results:
+                    break
+    return balanced
+
+
+def _search_service_registry() -> dict[str, SearchService]:
+    return {
+        "duckduckgo": SearchService("duckduckgo", _search_duckduckgo_html, ("general",), 1.0),
+        "wikipedia": SearchService("wikipedia", _search_wikipedia, ("encyclopedic", "humanities", "general"), 0.9),
+        "wikidata": SearchService("wikidata", _search_wikidata, ("facts", "entities", "general"), 0.8),
+        "openalex": SearchService("openalex", _search_openalex, ("scholarly", "science"), 0.9),
+        "crossref": SearchService("crossref", _search_crossref, ("scholarly", "citation"), 0.8),
+        "arxiv": SearchService("arxiv", _search_arxiv, ("scholarly", "preprints", "science"), 0.8),
+        "pubmed": SearchService("pubmed", _search_pubmed, ("medicine", "biology", "clinical"), 0.8),
+        "github": SearchService("github", _search_github_repositories, ("software", "code"), 0.8),
+        "hackernews": SearchService("hackernews", _search_hn_algolia, ("software", "startups", "tech"), 0.6),
+    }
+
+
+def list_search_services() -> list[dict[str, Any]]:
+    return [
+        {"name": svc.name, "subjects": list(svc.subjects), "weight": svc.weight}
+        for svc in _search_service_registry().values()
+    ]
 
 
 def _search_wikipedia(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -536,6 +645,121 @@ def _search_openalex(query: str, max_results: int, timeout: int) -> list[SearchR
         authors = [a.get("author", {}).get("display_name") for a in work.get("authorships", [])[:3]]
         snippet = ", ".join([str(year or ""), ", ".join(x for x in authors if x)]).strip(", ")
         items.append(SearchResult(title, source, snippet, "openalex"))
+    return items
+
+
+def _search_crossref(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://api.crossref.org/works?" + urllib.parse.urlencode(
+        {"query": query, "rows": min(max_results, 5), "select": "title,DOI,published-print,published-online,author,container-title"}
+    )
+    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+    data = resp.json()
+    items: list[SearchResult] = []
+    for work in data.get("message", {}).get("items", []):
+        titles = work.get("title") or []
+        title = titles[0] if titles else "Crossref work"
+        doi = work.get("DOI")
+        if not doi:
+            continue
+        authors = []
+        for author in work.get("author", [])[:3]:
+            name = " ".join(filter(None, [author.get("given"), author.get("family")]))
+            if name:
+                authors.append(name)
+        year = _crossref_year(work)
+        journal = (work.get("container-title") or [""])[0]
+        snippet = ", ".join(filter(None, [str(year or ""), journal, ", ".join(authors)]))
+        items.append(SearchResult(title, f"https://doi.org/{doi}", snippet, "crossref"))
+    return items
+
+
+def _crossref_year(work: dict[str, Any]) -> int | None:
+    for key in ("published-print", "published-online", "issued"):
+        parts = work.get(key, {}).get("date-parts") or []
+        if parts and parts[0]:
+            return parts[0][0]
+    return None
+
+
+def _search_arxiv(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode(
+        {"search_query": "all:" + query, "start": 0, "max_results": min(max_results, 5)}
+    )
+    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+    root = ET.fromstring(resp.text)
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    items: list[SearchResult] = []
+    for entry in root.findall("atom:entry", ns):
+        title = _clean_text(entry.findtext("atom:title", default="arXiv paper", namespaces=ns))
+        link = ""
+        for node in entry.findall("atom:link", ns):
+            if node.attrib.get("rel") == "alternate" or not link:
+                link = node.attrib.get("href", link)
+        summary = _clean_text(entry.findtext("atom:summary", default="", namespaces=ns))[:300]
+        published = entry.findtext("atom:published", default="", namespaces=ns)[:10]
+        snippet = " — ".join(filter(None, [published, summary]))
+        if link:
+            items.append(SearchResult(title, link, snippet, "arxiv"))
+    return items
+
+
+def _search_pubmed(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+    search_url = base + "esearch.fcgi?" + urllib.parse.urlencode(
+        {"db": "pubmed", "term": query, "retmode": "json", "retmax": min(max_results, 5)}
+    )
+    ids = requests.get(search_url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout).json().get("esearchresult", {}).get("idlist", [])
+    if not ids:
+        return []
+    summary_url = base + "esummary.fcgi?" + urllib.parse.urlencode({"db": "pubmed", "id": ",".join(ids), "retmode": "json"})
+    data = requests.get(summary_url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout).json().get("result", {})
+    items: list[SearchResult] = []
+    for pmid in ids:
+        rec = data.get(pmid) or {}
+        title = rec.get("title") or "PubMed article"
+        journal = rec.get("fulljournalname") or rec.get("source") or ""
+        pubdate = rec.get("pubdate") or ""
+        snippet = ", ".join(filter(None, [pubdate, journal]))
+        items.append(SearchResult(title, f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", snippet, "pubmed"))
+    return items
+
+
+def _search_wikidata(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(
+        {"action": "wbsearchentities", "search": query, "language": "en", "format": "json", "limit": min(max_results, 5)}
+    )
+    data = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout).json()
+    items = []
+    for item in data.get("search", []):
+        qid = item.get("id")
+        label = item.get("label") or qid or "Wikidata entity"
+        if not qid:
+            continue
+        snippet = item.get("description") or ""
+        items.append(SearchResult(label, f"https://www.wikidata.org/wiki/{qid}", snippet, "wikidata"))
+    return items
+
+
+def _search_github_repositories(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://api.github.com/search/repositories?" + urllib.parse.urlencode(
+        {"q": query, "sort": "stars", "order": "desc", "per_page": min(max_results, 5)}
+    )
+    data = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout).json()
+    items = []
+    for repo in data.get("items", []):
+        full_name = repo.get("full_name") or "GitHub repository"
+        html_url = repo.get("html_url")
+        if not html_url:
+            continue
+        stars = repo.get("stargazers_count", 0)
+        language = repo.get("language") or ""
+        description = repo.get("description") or ""
+        snippet = f"{stars} stars"
+        if language:
+            snippet += f", {language}"
+        if description:
+            snippet += f" — {description[:220]}"
+        items.append(SearchResult(full_name, html_url, snippet, "github"))
     return items
 
 
@@ -599,8 +823,13 @@ def research(
     timeout: int = 20,
     max_chars: int = 6000,
     use_camoufox: bool = True,
+    services: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    search_results = search_web(query, max_results=max_results, timeout=timeout)
+    profile = infer_subject_profile(query, services)
+    if services is None:
+        search_results = search_web(query, max_results=max_results, timeout=timeout)
+    else:
+        search_results = search_web(query, max_results=max_results, timeout=timeout, services=services)
     fetched: list[FetchResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(search_results)))) as pool:
         fut_map = {
@@ -627,6 +856,7 @@ def research(
         "query": query,
         "generated_at": email.utils.formatdate(usegmt=True),
         "status": status,
+        "subject_profile": profile.to_dict(),
         "warnings": warnings,
         "search_results": [r.to_dict() for r in search_results],
         "sources": [r.to_dict(max_chars=max_chars) for r in usable],

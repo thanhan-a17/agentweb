@@ -263,3 +263,49 @@ def test_duckduckgo_anomaly_page_returns_no_results(monkeypatch):
 
     monkeypatch.setattr(core.requests, "get", lambda *args, **kwargs: Resp())
     assert core._search_duckduckgo_html("agentweb", max_results=5, timeout=5) == []
+
+
+def test_subject_profile_routes_academic_and_medical_queries():
+    academic = core.infer_subject_profile("arxiv paper about sparse autoencoders")
+    assert "arxiv" in academic.services
+    assert "crossref" in academic.services
+    assert "scholarly" in academic.subjects
+
+    medical = core.infer_subject_profile("clinical trial medicine therapy")
+    assert "pubmed" in medical.services
+    assert "medicine" in medical.subjects
+
+
+def test_search_can_be_restricted_to_explicit_services(monkeypatch):
+    calls = []
+
+    def wiki(query, max_results, timeout):
+        calls.append("wikipedia")
+        return [core.SearchResult("Ada", "https://en.wikipedia.org/wiki/Ada", "", "wikipedia")]
+
+    def ddg(query, max_results, timeout):
+        calls.append("duckduckgo")
+        return [core.SearchResult("Ada", "https://example.com/ada", "", "duckduckgo")]
+
+    monkeypatch.setattr(core, "_search_wikipedia", wiki)
+    monkeypatch.setattr(core, "_search_duckduckgo_html", ddg)
+    results = core.search_web("Ada", max_results=5, timeout=5, services=["wikipedia"])
+    assert [r.source for r in results] == ["wikipedia"]
+    assert calls == ["wikipedia"]
+
+
+def test_balance_search_results_preserves_provider_diversity():
+    results = [
+        core.SearchResult("A1", "https://a/1", source="alpha"),
+        core.SearchResult("A2", "https://a/2", source="alpha"),
+        core.SearchResult("B1", "https://b/1", source="beta"),
+    ]
+    balanced = core._balance_search_results(results, max_results=3)
+    assert [r.source for r in balanced] == ["alpha", "beta", "alpha"]
+
+
+def test_cli_services_lists_registry(capsys):
+    code = main(["services", "--format", "json"])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert {item["name"] for item in data["services"]} >= {"duckduckgo", "wikipedia", "openalex", "pubmed", "github"}

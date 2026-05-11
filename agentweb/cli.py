@@ -5,13 +5,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from . import __version__
+try:
+    from . import __version__
+except ImportError:  # Editable CLI can be shadowed by Hermes' namespace path.
+    try:
+        __version__ = version("agentweb")
+    except PackageNotFoundError:
+        __version__ = "0.1.0"
 from .core import (
     fetch_url,
     format_markdown_fetch,
     format_markdown_research,
+    list_search_services,
     research,
     search_web,
 )
@@ -50,8 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("query")
     s.add_argument("--max-results", type=int, default=8)
     s.add_argument("--timeout", type=int, default=20)
+    s.add_argument("--service", action="append", help="Restrict discovery to a service; repeatable. Use 'all' for every service.")
     s.add_argument("--format", choices=["json", "markdown"], default="json")
     s.add_argument("--output", "-o")
+
+    svc = sub.add_parser("services", help="List available search/discovery services.")
+    svc.add_argument("--format", choices=["json", "markdown"], default="json")
+    svc.add_argument("--output", "-o")
 
     f = sub.add_parser("fetch", help="Fetch one URL using layered extraction tactics.")
     f.add_argument("url")
@@ -70,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-results", type=int, default=6)
     r.add_argument("--timeout", type=int, default=20)
     r.add_argument("--max-chars", type=int, default=6000)
+    r.add_argument("--service", action="append", help="Restrict discovery to a service; repeatable. Use 'all' for every service.")
     r.add_argument("--no-camoufox", action="store_true", help="Disable Camoufox fallback during source fetching.")
     r.add_argument("--format", choices=["json", "markdown"], default="json")
     r.add_argument("--output", "-o")
@@ -81,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "search":
-            results = [r.to_dict() for r in search_web(args.query, max_results=args.max_results, timeout=args.timeout)]
+            results = [r.to_dict() for r in search_web(args.query, max_results=args.max_results, timeout=args.timeout, services=args.service)]
             if args.format == "markdown":
                 lines = [f"# AgentWeb search: {args.query}", ""]
                 for i, item in enumerate(results, 1):
@@ -92,6 +106,17 @@ def main(argv: list[str] | None = None) -> int:
                 _emit("\n".join(lines) + "\n", "text", args.output)
             else:
                 _emit({"query": args.query, "results": results}, "json", args.output)
+            return 0
+
+        if args.command == "services":
+            services = list_search_services()
+            if args.format == "markdown":
+                lines = ["# AgentWeb services", ""]
+                for item in services:
+                    lines.append(f"- `{item['name']}` — {', '.join(item['subjects'])}")
+                _emit("\n".join(lines) + "\n", "text", args.output)
+            else:
+                _emit({"services": services}, "json", args.output)
             return 0
 
         if args.command == "fetch":
@@ -118,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 max_chars=args.max_chars,
                 use_camoufox=not args.no_camoufox,
+                services=args.service,
             )
             if args.format == "markdown":
                 _emit(format_markdown_research(pack), "text", args.output)

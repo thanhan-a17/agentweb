@@ -6,6 +6,8 @@ AgentWeb is a CLI web-access layer for agents. It gives Hermes one command for s
 
 ```bash
 agentweb search "query" --max-results 8 --format json
+agentweb search "query" --service wikipedia --service wikidata
+agentweb services --format markdown
 agentweb fetch https://example.com --format markdown
 agentweb research "best local LLM serving stack" --max-results 6 --format json
 ```
@@ -14,7 +16,8 @@ agentweb research "best local LLM serving stack" --max-results 6 --format json
 
 ## What it does
 
-- Uses broad no-key discovery providers: DuckDuckGo HTML, Wikipedia OpenSearch, OpenAlex scholarly search, plus Hacker News as a niche tech signal.
+- Uses broad no-key discovery providers: DuckDuckGo HTML, Wikipedia OpenSearch, Wikidata, OpenAlex, Crossref, arXiv, PubMed, GitHub, plus Hacker News as a niche tech signal.
+- Routes queries through subject profiles so academic, medical, software, startup, humanities, and entity-heavy searches get the right services without hand-tuning.
 - Fetches pages with realistic browser headers and redirect handling.
 - Extracts clean text, title, metadata, links, JSON-LD structured data, and Next.js React Server Component payloads.
 - Falls back to Jina Reader for cleaner article extraction or low-text pages.
@@ -32,6 +35,16 @@ Use `research` when the agent needs broad context:
 ```bash
 agentweb research "pricing of browser automation APIs" --max-results 8 --format json
 ```
+
+Use `services` and `--service` when the subject matter demands precision:
+
+```bash
+agentweb services --format markdown
+agentweb search "gene therapy clinical trial retinal disease" --service pubmed --service openalex --format json
+agentweb research "new transformer preprint sparse attention" --service arxiv --service crossref --format json
+```
+
+If `--service` is omitted, AgentWeb infers a subject profile and chooses a balanced provider set automatically.
 
 Use `fetch` when the agent already has URLs:
 
