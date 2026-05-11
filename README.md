@@ -21,4 +21,5 @@ Additional docs:
 
 - `docs/requirements.md` — concrete product definitions and target capabilities.
 - `docs/architecture.md` — components, service boundaries, data flows, and runtime responsibilities.
+- `docs/api.md` — SDK endpoint contracts, request/response schemas, status codes, and examples.
 - `docs/extensions.md` — examples for adding domains, agent roles, and tools/services.

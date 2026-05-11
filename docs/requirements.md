@@ -31,6 +31,7 @@ AgentWeb currently provides:
 - Research evidence packs with source quality checks and rejected-source reporting.
 - A mechanics module with agent definitions, execution policies, tool/service specs, schema validation, permission enforcement, and tool invocation.
 - A versioned SQLite persistence module for agent definitions, task state, tool call records, and audit logs.
+- An SDK-style API facade with versioned health, services, search, fetch, and research endpoints.
 
 ## Target capabilities
 

@@ -52,6 +52,20 @@ Primary data objects:
 - `ToolSpec`
 - `ToolRegistry`
 
+### API facade: `agentweb/api.py`
+
+Responsibilities:
+
+- expose stable SDK endpoints for `/v1/health`, `/v1/services`, `/v1/search`, `/v1/fetch`, and `/v1/research`
+- validate request bodies before calling core functions
+- return HTTP-like envelopes with status codes and human-readable errors
+- provide version information for app, API, and storage schema
+
+Primary data objects:
+
+- `AgentWebAPI`
+- `API_VERSION`
+
 ### Persistence layer: `agentweb/storage.py`
 
 Responsibilities:
