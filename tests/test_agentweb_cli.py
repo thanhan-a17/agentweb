@@ -115,3 +115,92 @@ def test_research_pack_uses_search_results(monkeypatch):
         assert pack["answer_pack"]["evidence"]
     finally:
         httpd.shutdown()
+
+
+def test_blocker_pages_are_not_ok_or_evidence():
+    result = core.FetchResult(
+        url="https://stackoverflow.com/questions/123",
+        final_url="https://stackoverflow.com/questions/123",
+        ok=True,
+        status_code=403,
+        title="Just a moment...",
+        text="Just a moment... Enable JavaScript and cookies to continue. Cloudflare Ray ID.",
+    )
+    core._classify_fetch_result(result)
+    assert result.ok is False
+    assert "blocker_or_login_wall" in result.warnings
+    assert core._answer_pack("playwright target closed", [result])["evidence"] == []
+
+
+def test_research_marks_empty_search_as_degraded(monkeypatch):
+    monkeypatch.setattr(core, "search_web", lambda query, max_results=6, timeout=20: [])
+    pack = research("rare topic with no results", max_results=3, timeout=5)
+    assert pack["status"] == "degraded"
+    assert pack["warnings"] == ["no_search_results"]
+    assert pack["answer_pack"]["evidence"] == []
+
+
+def test_cli_research_empty_search_returns_degraded_exit(monkeypatch, capsys):
+    monkeypatch.setattr(core, "search_web", lambda query, max_results=6, timeout=20: [])
+    code = main(["research", "rare topic", "--format", "json"])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert data["status"] == "degraded"
+
+
+def test_search_web_uses_broad_providers_beyond_hackernews(monkeypatch):
+    def ddg(query, max_results, timeout):
+        return []
+
+    def wikipedia(query, max_results, timeout):
+        return [core.SearchResult("Ada Lovelace", "https://en.wikipedia.org/wiki/Ada_Lovelace", "math history", "wikipedia")]
+
+    monkeypatch.setattr(core, "_search_duckduckgo_html", ddg)
+    monkeypatch.setattr(core, "_search_hn_algolia", lambda *args, **kwargs: [])
+    monkeypatch.setattr(core, "_search_wikipedia", wikipedia)
+    monkeypatch.setattr(core, "_search_openalex", lambda *args, **kwargs: [])
+    results = core.search_web("Ada Lovelace biography", max_results=5, timeout=5)
+    assert results[0].source == "wikipedia"
+
+
+def test_fetch_extracts_json_ld_structured_data():
+    raw = '''
+    <html><head><title>Surface title</title>
+    <script type="application/ld+json">{
+      "@type": "Article",
+      "headline": "Structured Research Article",
+      "datePublished": "2026-01-02",
+      "author": {"name": "Ada Writer"},
+      "description": "Deep structured evidence from JSON-LD."
+    }</script></head><body><p>Short body.</p></body></html>
+    '''
+    data = core._extract_structured_data(raw)
+    assert data[0]["headline"] == "Structured Research Article"
+    text = core._structured_data_text(data)
+    assert "Structured Research Article" in text
+    assert "Ada Writer" in text
+
+
+def test_camoufox_fallback_is_used_for_blocked_pages(monkeypatch):
+    class Resp:
+        status_code = 403
+        url = "https://example.com/protected"
+        headers = {"content-type": "text/html"}
+        encoding = "utf-8"
+        apparent_encoding = "utf-8"
+        text = "<html><title>Just a moment...</title><body>Just a moment...</body></html>"
+        content = b"x"
+
+    class Session:
+        headers = {}
+        cookies = {}
+        def get(self, *args, **kwargs):
+            return Resp()
+
+    monkeypatch.setattr(core, "_session", lambda **kwargs: Session())
+    monkeypatch.setattr(core, "_fetch_jina", lambda *args, **kwargs: None)
+    monkeypatch.setattr(core, "_fetch_with_camoufox", lambda url, timeout=30: "Protected article content with real evidence after browser rendering.")
+    result = fetch_url("https://example.com/protected", use_jina=True, use_camoufox=True)
+    assert result.ok is True
+    assert result.source == "camoufox_browser"
+    assert "Protected article content" in result.text

@@ -60,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--cookies", help="Cookie header string or Netscape cookies.txt path for logged-in pages.")
     f.add_argument("--header", action="append", help="Extra request header, e.g. Authorization: Bearer TOKEN")
     f.add_argument("--no-jina", action="store_true", help="Disable Jina reader fallback.")
+    f.add_argument("--camoufox", action="store_true", help="Try Camoufox browser fallback for bot-protected pages if installed.")
     f.add_argument("--browser", action="store_true", help="Try agent-browser snapshot fallback if installed.")
     f.add_argument("--format", choices=["json", "markdown"], default="json")
     f.add_argument("--output", "-o")
@@ -69,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-results", type=int, default=6)
     r.add_argument("--timeout", type=int, default=20)
     r.add_argument("--max-chars", type=int, default=6000)
+    r.add_argument("--no-camoufox", action="store_true", help="Disable Camoufox fallback during source fetching.")
     r.add_argument("--format", choices=["json", "markdown"], default="json")
     r.add_argument("--output", "-o")
 
@@ -101,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                 headers=_headers(args.header),
                 use_jina=not args.no_jina,
                 use_browser=args.browser,
+                use_camoufox=args.camoufox,
             )
             if args.format == "markdown":
                 _emit(format_markdown_fetch(result, max_chars=args.max_chars), "text", args.output)
@@ -109,12 +112,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result.ok else 2
 
         if args.command == "research":
-            pack = research(args.query, max_results=args.max_results, timeout=args.timeout, max_chars=args.max_chars)
+            pack = research(
+                args.query,
+                max_results=args.max_results,
+                timeout=args.timeout,
+                max_chars=args.max_chars,
+                use_camoufox=not args.no_camoufox,
+            )
             if args.format == "markdown":
                 _emit(format_markdown_research(pack), "text", args.output)
             else:
                 _emit(pack, "json", args.output)
-            return 0
+            return 0 if pack.get("status") == "ok" else 2
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

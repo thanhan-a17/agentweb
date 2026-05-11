@@ -14,14 +14,16 @@ agentweb research "best local LLM serving stack" --max-results 6 --format json
 
 ## What it does
 
-- Uses resilient no-key search providers: DuckDuckGo HTML + Hacker News Algolia.
+- Uses broad no-key discovery providers: DuckDuckGo HTML, Wikipedia OpenSearch, OpenAlex scholarly search, plus Hacker News as a niche tech signal.
 - Fetches pages with realistic browser headers and redirect handling.
-- Extracts clean text, title, metadata, and links.
-- Parses Next.js React Server Component payloads when the visible HTML is a shell.
-- Falls back to Jina Reader for cleaner article extraction or blocked/low-text pages.
+- Extracts clean text, title, metadata, links, JSON-LD structured data, and Next.js React Server Component payloads.
+- Falls back to Jina Reader for cleaner article extraction or low-text pages.
+- Filters blocker/login/verification pages out of evidence packs instead of treating them as successful sources.
+- Marks empty or unusable research packs as `status: degraded` and returns exit code 2.
 - Supports logged-in pages with `--cookies` as either a raw Cookie header or Netscape `cookies.txt` path.
 - Optionally tries `agent-browser` snapshots with `--browser` when installed.
-- Emits compact JSON/Markdown designed for LLM context, with warnings and quality scores.
+- Optionally tries Camoufox browser rendering for bot-protected pages with `--camoufox` on `fetch`; `research` uses Camoufox fallback by default when installed, disable with `--no-camoufox`.
+- Emits compact JSON/Markdown designed for LLM context, with warnings, rejected sources, and quality scores.
 
 ## Agent usage pattern
 
@@ -35,6 +37,7 @@ Use `fetch` when the agent already has URLs:
 
 ```bash
 agentweb fetch https://docs.example.com/page --format json --max-chars 20000
+agentweb fetch https://example.com/protected --camoufox --format markdown
 ```
 
 Use cookies for user-authorized logged-in pages:

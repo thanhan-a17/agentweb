@@ -31,7 +31,9 @@ USER_AGENTS = [
 ]
 
 BLOCK_PATTERNS = re.compile(
-    r"captcha|cloudflare|access denied|verify you are human|unusual traffic|bot detection|blocked",
+    r"captcha|cloudflare|access denied|verify you are human|unusual traffic|bot detection|blocked|"
+    r"just a moment|please wait for verification|enable javascript and cookies|network security|"
+    r"sign in to view|log in to your .*account|target url returned error\s+403|duckduckgo.*/anomaly\.js",
     re.I,
 )
 TEXT_MIME_HINTS = ("text/", "application/json", "application/xml", "application/xhtml+xml")
@@ -64,9 +66,11 @@ class FetchResult:
         if self.links:
             score += 0.2
         if any("block" in w.lower() or "captcha" in w.lower() for w in self.warnings):
-            score -= 1.5
+            score -= 4.0
         if self.status_code and self.status_code >= 400:
-            score -= 1.0
+            score -= 2.0
+        if _looks_blocked("\n".join([self.title, self.text]), self.status_code):
+            score -= 4.0
         return score
 
     def to_dict(self, max_chars: int = 12000) -> dict[str, Any]:
@@ -207,6 +211,51 @@ def _extract_metadata(raw: str, response: requests.Response | None = None) -> di
     return meta
 
 
+def _extract_structured_data(raw: str) -> list[dict[str, Any]]:
+    """Extract JSON-LD blocks so agents get data beyond visible boilerplate."""
+    out: list[dict[str, Any]] = []
+    for m in re.finditer(r'(?is)<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', raw):
+        blob = html.unescape(m.group(1)).strip()
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if isinstance(item, dict):
+                if "@graph" in item and isinstance(item["@graph"], list):
+                    out.extend(x for x in item["@graph"] if isinstance(x, dict))
+                else:
+                    out.append(item)
+    return out[:20]
+
+
+def _structured_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("name", "headline", "description", "text", "url"):
+            if value.get(key):
+                return _structured_value(value[key])
+    if isinstance(value, list):
+        return ", ".join(filter(None, (_structured_value(v) for v in value)))
+    return ""
+
+
+def _structured_data_text(items: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    interesting = ["@type", "headline", "name", "description", "datePublished", "dateModified", "author", "publisher", "url"]
+    for item in items[:10]:
+        parts = []
+        for key in interesting:
+            val = _structured_value(item.get(key))
+            if val:
+                parts.append(f"{key}: {val}")
+        if parts:
+            lines.append("; ".join(parts))
+    return _clean_text("\n".join(lines))
+
+
 def _extract_links(raw: str, base_url: str) -> list[dict[str, str]]:
     links = []
     seen = set()
@@ -246,6 +295,22 @@ def _looks_blocked(text: str, status_code: int | None) -> bool:
     return bool(BLOCK_PATTERNS.search(text[:5000]))
 
 
+def _classify_fetch_result(result: FetchResult) -> FetchResult:
+    blocked = _looks_blocked("\n".join([result.title, result.text]), result.status_code)
+    if blocked:
+        result.ok = False
+        if "blocker_or_login_wall" not in result.warnings:
+            result.warnings.append("blocker_or_login_wall")
+    elif not result.text.strip():
+        result.ok = False
+        if "empty_text" not in result.warnings:
+            result.warnings.append("empty_text")
+    else:
+        result.ok = not (result.status_code and result.status_code >= 500)
+    result.warnings = sorted(set(result.warnings))
+    return result
+
+
 def fetch_url(
     url: str,
     *,
@@ -255,6 +320,7 @@ def fetch_url(
     max_chars: int = 12000,
     use_jina: bool = True,
     use_browser: bool = False,
+    use_camoufox: bool = False,
 ) -> FetchResult:
     start = time.monotonic()
     url = _safe_url(url)
@@ -281,8 +347,11 @@ def fetch_url(
     text = ""
     if raw:
         next_payload = _extract_nextjs_payload(raw)
+        structured = _structured_data_text(_extract_structured_data(raw))
         visible = _strip_html(raw)
         text = visible
+        if structured:
+            text = _clean_text(text + "\n\n[Structured data]\n" + structured)
         if next_payload and len(next_payload) > len(visible) * 0.25:
             tactics.append("nextjs_rsc_payload")
             text = _clean_text(visible + "\n\n[Next.js/RSC payload]\n" + next_payload)
@@ -295,12 +364,24 @@ def fetch_url(
     # Jina reader is excellent for article-like public pages and often beats ad-heavy HTML.
     if use_jina and (not text or len(text) < 1200 or warnings):
         jina = _fetch_jina(url, timeout=timeout)
-        if jina and len(jina.text) > len(text):
+        if jina:
+            _classify_fetch_result(jina)
+        if jina and jina.ok and len(jina.text) > len(text):
             tactics.append("jina_reader")
             text = jina.text
             result.title = result.title or jina.title
             result.metadata.update(jina.metadata)
             warnings.extend(jina.warnings)
+
+    if use_camoufox and (not text or _looks_blocked("\n".join([result.title, text]), result.status_code)):
+        camoufox_text = _fetch_with_camoufox(url, timeout=timeout)
+        if camoufox_text and not _looks_blocked(camoufox_text, None):
+            tactics.append("camoufox_browser")
+            text = camoufox_text
+            result.title = ""
+            result.status_code = None
+            warnings = [w for w in warnings if "block" not in w.lower() and "login" not in w.lower()]
+            warnings.append("camoufox_rendered_from_blocked_page")
 
     # Optional browser fallback. Kept opt-in because browsers are expensive.
     if use_browser and (not text or _looks_blocked(text, result.status_code)):
@@ -315,7 +396,7 @@ def fetch_url(
     result.tactics = tactics
     result.warnings = sorted(set(warnings))
     result.elapsed_ms = int((time.monotonic() - start) * 1000)
-    return result
+    return _classify_fetch_result(result)
 
 
 def _fetch_jina(url: str, timeout: int = 20) -> FetchResult | None:
@@ -366,8 +447,45 @@ def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
     return ""
 
 
+def _fetch_with_camoufox(url: str, timeout: int = 30) -> str:
+    """Optional bot-resistant browser fallback. No hard dependency: returns empty if absent."""
+    script = r'''
+import sys
+try:
+    from camoufox.sync_api import Camoufox
+except Exception:
+    sys.exit(2)
+url = sys.argv[1]
+with Camoufox(headless=True, humanize=True) as browser:
+    page = browser.new_page()
+    page.goto(url, wait_until="networkidle", timeout=int(sys.argv[2]) * 1000)
+    try:
+        title = page.title()
+    except Exception:
+        title = ""
+    try:
+        text = page.locator("body").inner_text(timeout=5000)
+    except Exception:
+        text = page.content()
+    print((title + "\n" + text).strip())
+'''
+    try:
+        proc = subprocess.run(
+            [shutil.which("python3") or "python3", "-c", script, url, str(timeout)],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 10,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if proc.returncode == 0 and len(proc.stdout.strip()) > 100:
+        return _clean_text(proc.stdout)
+    return ""
+
+
 def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
-    providers = [_search_duckduckgo_html, _search_hn_algolia]
+    providers = [_search_duckduckgo_html, _search_wikipedia, _search_openalex, _search_hn_algolia]
     results: list[SearchResult] = []
     seen = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
@@ -382,6 +500,38 @@ def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[S
             except Exception:
                 continue
     return results[:max_results]
+
+
+def _search_wikipedia(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
+        {"action": "opensearch", "search": query, "limit": min(max_results, 5), "namespace": 0, "format": "json"}
+    )
+    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+    data = resp.json()
+    titles = data[1] if len(data) > 1 else []
+    snippets = data[2] if len(data) > 2 else []
+    urls = data[3] if len(data) > 3 else []
+    return [SearchResult(t, u, snippets[i] if i < len(snippets) else "", "wikipedia") for i, (t, u) in enumerate(zip(titles, urls))]
+
+
+def _search_openalex(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    url = "https://api.openalex.org/works?" + urllib.parse.urlencode(
+        {"search": query, "per-page": min(max_results, 5), "select": "title,doi,publication_year,authorships,primary_location"}
+    )
+    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+    data = resp.json()
+    items: list[SearchResult] = []
+    for work in data.get("results", []):
+        title = work.get("title") or "OpenAlex result"
+        loc = work.get("primary_location") or {}
+        source = loc.get("landing_page_url") or work.get("doi")
+        if not source:
+            continue
+        year = work.get("publication_year")
+        authors = [a.get("author", {}).get("display_name") for a in work.get("authorships", [])[:3]]
+        snippet = ", ".join([str(year or ""), ", ".join(x for x in authors if x)]).strip(", ")
+        items.append(SearchResult(title, source, snippet, "openalex"))
+    return items
 
 
 def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -437,12 +587,19 @@ def _search_hn_algolia(query: str, max_results: int, timeout: int) -> list[Searc
     return items
 
 
-def research(query: str, *, max_results: int = 6, timeout: int = 20, max_chars: int = 6000) -> dict[str, Any]:
+def research(
+    query: str,
+    *,
+    max_results: int = 6,
+    timeout: int = 20,
+    max_chars: int = 6000,
+    use_camoufox: bool = True,
+) -> dict[str, Any]:
     search_results = search_web(query, max_results=max_results, timeout=timeout)
     fetched: list[FetchResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(search_results)))) as pool:
         fut_map = {
-            pool.submit(fetch_url, r.url, timeout=timeout, max_chars=max_chars, use_jina=True): r
+            pool.submit(fetch_url, r.url, timeout=timeout, max_chars=max_chars, use_jina=True, use_camoufox=use_camoufox): r
             for r in search_results
         }
         for fut in concurrent.futures.as_completed(fut_map):
@@ -452,12 +609,24 @@ def research(query: str, *, max_results: int = 6, timeout: int = 20, max_chars: 
                 sr = fut_map[fut]
                 fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"fetch_failed:{exc}"]))
     fetched.sort(key=lambda r: r.quality_score(), reverse=True)
+    usable = [r for r in fetched if r.ok and r.quality_score() >= 1.0]
+    warnings = []
+    status = "ok"
+    if not search_results:
+        status = "degraded"
+        warnings.append("no_search_results")
+    elif not usable:
+        status = "degraded"
+        warnings.append("no_usable_sources")
     return {
         "query": query,
         "generated_at": email.utils.formatdate(usegmt=True),
+        "status": status,
+        "warnings": warnings,
         "search_results": [r.to_dict() for r in search_results],
-        "sources": [r.to_dict(max_chars=max_chars) for r in fetched],
-        "answer_pack": _answer_pack(query, fetched),
+        "sources": [r.to_dict(max_chars=max_chars) for r in usable],
+        "rejected_sources": [r.to_dict(max_chars=1000) for r in fetched if r not in usable],
+        "answer_pack": _answer_pack(query, usable),
     }
 
 
@@ -465,7 +634,7 @@ def _answer_pack(query: str, sources: Iterable[FetchResult]) -> dict[str, Any]:
     q_terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9]{3,}", query)}
     bullets = []
     for src in sources:
-        if not src.text:
+        if not src.ok or not src.text or _looks_blocked("\n".join([src.title, src.text]), src.status_code):
             continue
         sentences = re.split(r"(?<=[.!?])\s+|\n+", src.text)
         ranked = []
