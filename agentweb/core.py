@@ -57,20 +57,25 @@ class FetchResult:
 
     def quality_score(self) -> float:
         score = 0.0
+        combined = "\n".join([self.title, self.text])
+        blocked = _looks_blocked(combined, self.status_code)
+
         if self.ok:
             score += 2.0
-        if self.title:
+        if self.title and not blocked:
             score += 0.4
         text_len = len(self.text.strip())
         score += min(text_len / 2500.0, 3.0)
-        if self.links:
+        if self.links and not blocked:
             score += 0.2
-        if any("block" in w.lower() or "captcha" in w.lower() for w in self.warnings):
-            score -= 4.0
+
+        warning_text = " ".join(self.warnings).lower()
+        if any(term in warning_text for term in ("block", "captcha", "login", "verification")):
+            score -= 5.0
         if self.status_code and self.status_code >= 400:
-            score -= 2.0
-        if _looks_blocked("\n".join([self.title, self.text]), self.status_code):
-            score -= 4.0
+            score -= 3.0
+        if blocked:
+            score -= 6.0
         return score
 
     def to_dict(self, max_chars: int = 12000) -> dict[str, Any]:

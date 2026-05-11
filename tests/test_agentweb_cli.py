@@ -204,3 +204,62 @@ def test_camoufox_fallback_is_used_for_blocked_pages(monkeypatch):
     assert result.ok is True
     assert result.source == "camoufox_browser"
     assert "Protected article content" in result.text
+
+
+def test_jina_fallback_does_not_launder_blocked_pages(monkeypatch):
+    class Resp:
+        status_code = 403
+        url = "https://example.com/protected"
+        headers = {"content-type": "text/html"}
+        encoding = "utf-8"
+        apparent_encoding = "utf-8"
+        text = "<html><title>Access denied</title><body>Enable JavaScript and cookies to continue.</body></html>"
+        content = b"x"
+
+    class Session:
+        headers = {}
+        cookies = {}
+        def get(self, *args, **kwargs):
+            return Resp()
+
+    monkeypatch.setattr(core, "_session", lambda **kwargs: Session())
+    monkeypatch.setattr(
+        core,
+        "_fetch_jina",
+        lambda *args, **kwargs: core.FetchResult(
+            url="https://example.com/protected",
+            final_url="https://example.com/protected",
+            ok=True,
+            status_code=200,
+            source="jina_reader",
+            title="Please wait for verification",
+            text="Please wait for verification. Sign in to view more content. " * 80,
+            tactics=["jina_reader"],
+        ),
+    )
+    result = fetch_url("https://example.com/protected", use_jina=True, use_camoufox=False)
+    assert result.ok is False
+    assert result.source != "jina_reader"
+    assert "blocker_or_login_wall" in result.warnings
+
+
+def test_blocked_login_wall_quality_score_cannot_pass_source_gate():
+    result = core.FetchResult(
+        url="https://example.com/login-wall",
+        final_url="https://example.com/login-wall",
+        ok=True,
+        status_code=200,
+        source="direct_http",
+        title="Sign in to view more content",
+        text="Sign in to view more content. " * 1000,
+    )
+    assert result.quality_score() < 1.0
+
+
+def test_duckduckgo_anomaly_page_returns_no_results(monkeypatch):
+    class Resp:
+        status_code = 200
+        text = '<html><script src="/anomaly.js"></script><form id="challenge-form">verify</form></html>'
+
+    monkeypatch.setattr(core.requests, "get", lambda *args, **kwargs: Resp())
+    assert core._search_duckduckgo_html("agentweb", max_results=5, timeout=5) == []
