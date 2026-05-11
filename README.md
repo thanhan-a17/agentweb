@@ -16,3 +16,9 @@ agentweb fetch https://example.com/protected --camoufox --format markdown
 ```
 
 See `docs/agentweb.md` for usage notes.
+
+Additional docs:
+
+- `docs/requirements.md` — concrete product definitions and target capabilities.
+- `docs/architecture.md` — components, service boundaries, data flows, and runtime responsibilities.
+- `docs/extensions.md` — examples for adding domains, agent roles, and tools/services.
