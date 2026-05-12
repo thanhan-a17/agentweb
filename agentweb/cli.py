@@ -15,6 +15,7 @@ from .core import (
     research,
     search_web,
 )
+from .deep_research import deep_research
 
 
 def _headers(values: list[str] | None) -> dict[str, str]:
@@ -72,6 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--format", choices=["json", "markdown"], default="json")
     r.add_argument("--output", "-o")
 
+    dr = sub.add_parser("deep-research", help="Multi-branch deep research: decompose, parallel fetch, BM25 rank, extract evidence. No LLM.")
+    dr.add_argument("query")
+    dr.add_argument("--max-results", type=int, default=8)
+    dr.add_argument("--timeout", type=int, default=20)
+    dr.add_argument("--max-chars", type=int, default=6000)
+    dr.add_argument("--refinement-loops", type=int, default=1)
+    dr.add_argument("--format", choices=["json", "markdown"], default="markdown")
+    dr.add_argument("--output", "-o")
+
     return p
 
 
@@ -114,6 +124,20 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(format_markdown_research(pack), "text", args.output)
             else:
                 _emit(pack, "json", args.output)
+            return 0
+
+        if args.command == "deep-research":
+            result = deep_research(
+                args.query,
+                max_results=args.max_results,
+                timeout=args.timeout,
+                max_chars=args.max_chars,
+                refinement_loops=args.refinement_loops,
+            )
+            if args.format == "markdown":
+                _emit(result["report_markdown"], "text", args.output)
+            else:
+                _emit(result["report_json"], "json", args.output)
             return 0
     except KeyboardInterrupt:
         return 130
