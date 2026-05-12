@@ -36,6 +36,215 @@ BLOCK_PATTERNS = re.compile(
 )
 TEXT_MIME_HINTS = ("text/", "application/json", "application/xml", "application/xhtml+xml")
 
+# ── Pre-compiled regexes for hot paths ──────────────────────────────────
+_RE_STRIP_BLOCK = re.compile(r"(?is)<(script|style|noscript|svg|canvas|template).*?</\1>")
+_RE_STRIP_COMMENT = re.compile(r"(?is)<!--.*?-->")
+_RE_STRIP_BR = re.compile(r"(?is)<br\s*/>")
+_RE_STRIP_CONTAINER = re.compile(r"(?is)</(p|div|section|article|li|h[1-6]|tr|blockquote)>")
+_RE_STRIP_TAGS = re.compile(r"(?is)<[^>]+>")
+_RE_WHITESPACE = re.compile(r"\s+")
+_RE_TITLE_OG = re.compile(r'(?is)<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)')
+_RE_TITLE_TWITTER = re.compile(r'(?is)<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)')
+_RE_TITLE_TAG = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
+_RE_TITLE_H1 = re.compile(r"(?is)<h1[^>]*>(.*?)</h1>")
+_RE_META_TAG = re.compile(r'(?is)<meta\s+([^>]+)>')
+_RE_META_ATTRS = re.compile(r'([\w:-]+)=["\']([^"\']*)["\']')
+_RE_LINK_ANCHOR = re.compile(r'(?is)<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>')
+_RE_NEXTJS_PUSH = re.compile(r"self\.__next_f\.push\((.*?)\)</script>", re.S)
+_RE_NEXTJS_STRINGS = re.compile(r'"((?:[^"\\]|\\.){40,})"')
+_RE_LETTERS = re.compile(r"[A-Za-z]{4}")
+_RE_JINA_TITLE = re.compile(r"^Title:\s*(.+)$", re.M)
+_RE_DDG_RESULT = re.compile(r'(?is)<div class="result results_links.*?</div>\s*</div>')
+_RE_DDG_HREF = re.compile(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>')
+_RE_DDG_SNIPPET = re.compile(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>')
+_RE_AD_URL_HOST = re.compile(r"duckduckgo\.com$")
+_RE_TERM_TOKEN = re.compile(r"[a-zA-Z0-9]{3,}")
+_RE_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+_RE_SAFE_URL_SCHEME = re.compile(r"^https?://")
+
+# ── TTL caches ──────────────────────────────────────────────────────────
+_SEARCH_CACHE: dict[str, tuple[float, list[SearchResult]]] = {}
+"""Simple TTL cache for search_web results. Key = query|max_results, value = (expiry, results)."""
+_SEARCH_CACHE_TTL = 60  # seconds
+
+# ── Shared thread pool ──────────────────────────────────────────────────
+_SEARCH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="agentweb_search")
+
+# ── Shared HTTP session ─────────────────────────────────────────────────
+_DEFAULT_SESSION: requests.Session | None = None
+"""Reusable requests Session with connection pooling, used for plain fetches."""
+
+
+def _get_default_session() -> requests.Session:
+    global _DEFAULT_SESSION
+    if _DEFAULT_SESSION is None:
+        s = requests.Session()
+        s.headers.update(
+            {
+                "User-Agent": USER_AGENTS[0],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "DNT": "1",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
+        _DEFAULT_SESSION = s
+    return _DEFAULT_SESSION
+
+
+def _session(timeout: int = 20, cookies: str | None = None, headers: dict[str, str] | None = None) -> requests.Session:
+    """Get an HTTP session.
+
+    Returns the shared default session when no custom cookies/headers are needed,
+    avoiding repeated session creation overhead. Falls back to a fresh session
+    when custom headers or cookies are supplied.
+    """
+    if not cookies and not headers:
+        s = _get_default_session()
+        # Patch timeout on each call since timeout varies per call
+        s.request = _timeout_wrapper(s.request, timeout)  # type: ignore[method-assign]
+        return s
+
+    s = requests.Session()
+    s.headers.update(
+        {
+            "User-Agent": USER_AGENTS[0],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
+            "Upgrade-Insecure-Requests": "1",
+        }
+    )
+    if headers:
+        s.headers.update(headers)
+    if cookies:
+        p = Path(cookies).expanduser()
+        if p.exists():
+            jar = MozillaCookieJar(str(p))
+            jar.load(ignore_discard=True, ignore_expires=True)
+            s.cookies.update(jar)
+        else:
+            s.headers["Cookie"] = cookies
+    s.request = _timeout_wrapper(s.request, timeout)  # type: ignore[method-assign]
+    return s
+
+
+def _timeout_wrapper(fn, timeout: int):
+    def wrapped(method, url, **kwargs):
+        kwargs.setdefault("timeout", timeout)
+        return fn(method, url, **kwargs)
+
+    return wrapped
+
+
+def _safe_url(url: str) -> str:
+    if "://" not in url:
+        url = "https://" + url
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Unsupported URL: {url}")
+    return urllib.parse.urlunparse(parsed)
+
+
+def _strip_html(raw: str) -> str:
+    raw = _RE_STRIP_BLOCK.sub(" ", raw)
+    raw = _RE_STRIP_COMMENT.sub(" ", raw)
+    raw = _RE_STRIP_BR.sub("\n", raw)
+    raw = _RE_STRIP_CONTAINER.sub("\n", raw)
+    raw = _RE_STRIP_TAGS.sub(" ", raw)
+    raw = html.unescape(raw)
+    return _clean_text(raw)
+
+
+def _clean_text(text: str) -> str:
+    lines = []
+    seen = set()
+    for line in text.splitlines():
+        line = _RE_WHITESPACE.sub(" ", line).strip()
+        if not line:
+            continue
+        # Drop obvious nav boilerplate but keep repeated short facts out.
+        low = line.lower()
+        if low in {"skip to content", "menu", "subscribe", "sign in", "log in"}:
+            continue
+        key = line[:160]
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _extract_title(raw: str) -> str:
+    for pattern in [_RE_TITLE_OG, _RE_TITLE_TWITTER, _RE_TITLE_TAG, _RE_TITLE_H1]:
+        m = pattern.search(raw)
+        if m:
+            return _clean_text(_strip_html(m.group(1)))[:250]
+    return ""
+
+
+def _extract_metadata(raw: str, response: requests.Response | None = None) -> dict[str, str]:
+    meta: dict[str, str] = {}
+    if response is not None:
+        for key in ["content-type", "last-modified", "etag"]:
+            val = response.headers.get(key)
+            if val:
+                meta[key] = val
+        if response.headers.get("date"):
+            meta["fetched_server_date"] = response.headers["date"]
+    for m in _RE_META_TAG.finditer(raw):
+        attrs = dict(_RE_META_ATTRS.findall(m.group(1)))
+        name = attrs.get("name") or attrs.get("property")
+        content = attrs.get("content")
+        if name and content and name.lower() in {
+            "description",
+            "og:description",
+            "article:published_time",
+            "article:modified_time",
+            "author",
+        }:
+            meta[name.lower()] = html.unescape(content).strip()
+    return meta
+
+
+def _extract_links(raw: str, base_url: str) -> list[dict[str, str]]:
+    links = []
+    seen = set()
+    for href, label in _RE_LINK_ANCHOR.findall(raw):
+        if href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        absolute = urllib.parse.urljoin(base_url, html.unescape(href))
+        absolute = absolute.split("#", 1)[0]
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        links.append({"url": absolute, "text": _clean_text(_strip_html(label))[:160]})
+        if len(links) >= 80:
+            break
+    return links
+
+
+def _extract_nextjs_payload(raw: str) -> str:
+    chunks: list[str] = []
+    for m in _RE_NEXTJS_PUSH.finditer(raw):
+        blob = html.unescape(m.group(1))
+        strings = _RE_NEXTJS_STRINGS.findall(blob)
+        for s in strings:
+            try:
+                s = json.loads('"' + s + '"')
+            except Exception:
+                pass
+            if _RE_LETTERS.search(s):
+                chunks.append(s)
+    cleaned = _clean_text("\n".join(chunks))
+    return cleaned[:20000]
+
+
+def _looks_blocked(text: str, status_code: int | None) -> bool:
+    if status_code in {401, 403, 429, 503}:
+        return True
+    return bool(BLOCK_PATTERNS.search(text[:5000]))
+
 
 @dataclass
 class FetchResult:
@@ -99,151 +308,6 @@ class SearchResult:
 
     def to_dict(self) -> dict[str, str]:
         return {"title": self.title, "url": self.url, "snippet": self.snippet, "source": self.source}
-
-
-def _session(timeout: int = 20, cookies: str | None = None, headers: dict[str, str] | None = None) -> requests.Session:
-    s = requests.Session()
-    s.headers.update(
-        {
-            "User-Agent": USER_AGENTS[0],
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "DNT": "1",
-            "Upgrade-Insecure-Requests": "1",
-        }
-    )
-    if headers:
-        s.headers.update(headers)
-    if cookies:
-        p = Path(cookies).expanduser()
-        if p.exists():
-            jar = MozillaCookieJar(str(p))
-            jar.load(ignore_discard=True, ignore_expires=True)
-            s.cookies.update(jar)
-        else:
-            s.headers["Cookie"] = cookies
-    s.request = _timeout_wrapper(s.request, timeout)  # type: ignore[method-assign]
-    return s
-
-
-def _timeout_wrapper(fn, timeout: int):
-    def wrapped(method, url, **kwargs):
-        kwargs.setdefault("timeout", timeout)
-        return fn(method, url, **kwargs)
-
-    return wrapped
-
-
-def _safe_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url if "://" in url else "https://" + url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(f"Unsupported URL: {url}")
-    return urllib.parse.urlunparse(parsed)
-
-
-def _strip_html(raw: str) -> str:
-    raw = re.sub(r"(?is)<(script|style|noscript|svg|canvas|template).*?</\1>", " ", raw)
-    raw = re.sub(r"(?is)<!--.*?-->", " ", raw)
-    raw = re.sub(r"(?is)<br\s*/?>", "\n", raw)
-    raw = re.sub(r"(?is)</(p|div|section|article|li|h[1-6]|tr|blockquote)>", "\n", raw)
-    raw = re.sub(r"(?is)<[^>]+>", " ", raw)
-    raw = html.unescape(raw)
-    return _clean_text(raw)
-
-
-def _clean_text(text: str) -> str:
-    lines = []
-    seen = set()
-    for line in text.splitlines():
-        line = re.sub(r"\s+", " ", line).strip()
-        if not line:
-            continue
-        # Drop obvious nav boilerplate but keep repeated short facts out.
-        low = line.lower()
-        if low in {"skip to content", "menu", "subscribe", "sign in", "log in"}:
-            continue
-        key = line[:160]
-        if key in seen:
-            continue
-        seen.add(key)
-        lines.append(line)
-    return "\n".join(lines).strip()
-
-
-def _extract_title(raw: str) -> str:
-    for pattern in [
-        r'(?is)<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)',
-        r'(?is)<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)',
-        r"(?is)<title[^>]*>(.*?)</title>",
-        r"(?is)<h1[^>]*>(.*?)</h1>",
-    ]:
-        m = re.search(pattern, raw)
-        if m:
-            return _clean_text(_strip_html(m.group(1)))[:250]
-    return ""
-
-
-def _extract_metadata(raw: str, response: requests.Response | None = None) -> dict[str, str]:
-    meta: dict[str, str] = {}
-    if response is not None:
-        for key in ["content-type", "last-modified", "etag"]:
-            val = response.headers.get(key)
-            if val:
-                meta[key] = val
-        if response.headers.get("date"):
-            meta["fetched_server_date"] = response.headers["date"]
-    for m in re.finditer(r'(?is)<meta\s+([^>]+)>', raw):
-        attrs = dict(re.findall(r'([\w:-]+)=["\']([^"\']*)["\']', m.group(1)))
-        name = attrs.get("name") or attrs.get("property")
-        content = attrs.get("content")
-        if name and content and name.lower() in {
-            "description",
-            "og:description",
-            "article:published_time",
-            "article:modified_time",
-            "author",
-        }:
-            meta[name.lower()] = html.unescape(content).strip()
-    return meta
-
-
-def _extract_links(raw: str, base_url: str) -> list[dict[str, str]]:
-    links = []
-    seen = set()
-    for href, label in re.findall(r'(?is)<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', raw):
-        if href.startswith(("#", "javascript:", "mailto:", "tel:")):
-            continue
-        absolute = urllib.parse.urljoin(base_url, html.unescape(href))
-        absolute = absolute.split("#", 1)[0]
-        if absolute in seen:
-            continue
-        seen.add(absolute)
-        links.append({"url": absolute, "text": _clean_text(_strip_html(label))[:160]})
-        if len(links) >= 80:
-            break
-    return links
-
-
-def _extract_nextjs_payload(raw: str) -> str:
-    chunks: list[str] = []
-    for m in re.finditer(r"self\.__next_f\.push\((.*?)\)</script>", raw, re.S):
-        blob = html.unescape(m.group(1))
-        strings = re.findall(r'"((?:[^"\\]|\\.){40,})"', blob)
-        for s in strings:
-            try:
-                s = json.loads('"' + s + '"')
-            except Exception:
-                pass
-            if re.search(r"[A-Za-z]{4}", s):
-                chunks.append(s)
-    cleaned = _clean_text("\n".join(chunks))
-    return cleaned[:20000]
-
-
-def _looks_blocked(text: str, status_code: int | None) -> bool:
-    if status_code in {401, 403, 429, 503}:
-        return True
-    return bool(BLOCK_PATTERNS.search(text[:5000]))
 
 
 def fetch_url(
@@ -321,14 +385,15 @@ def fetch_url(
 def _fetch_jina(url: str, timeout: int = 20) -> FetchResult | None:
     reader_url = "https://r.jina.ai/http://" + re.sub(r"^https?://", "", url)
     if url.startswith("https://"):
-        reader_url = "https://r.jina.ai/http://" + url[len("https://") :]
+        reader_url = "https://r.jina.ai/http://" + url[len("https://"):]
     try:
-        resp = requests.get(reader_url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+        session = _get_default_session()
+        resp = session.get(reader_url, timeout=timeout)
         text = resp.text or ""
         if resp.status_code >= 400 or not text.strip():
             return None
         title = ""
-        m = re.search(r"^Title:\s*(.+)$", text, re.M)
+        m = _RE_JINA_TITLE.search(text)
         if m:
             title = m.group(1).strip()
         return FetchResult(
@@ -367,30 +432,43 @@ def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
 
 
 def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
+    # Check TTL cache
+    cache_key = f"{query}|{max_results}"
+    now = time.monotonic()
+    cached = _SEARCH_CACHE.get(cache_key)
+    if cached:
+        expiry, results = cached
+        if now < expiry:
+            return results[:max_results]
+
     providers = [_search_duckduckgo_html, _search_hn_algolia]
     results: list[SearchResult] = []
     seen = set()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
-        futs = [pool.submit(p, query, max_results, timeout) for p in providers]
-        for fut in concurrent.futures.as_completed(futs):
-            try:
-                for item in fut.result():
-                    key = _canonical_url(item.url)
-                    if key and key not in seen:
-                        seen.add(key)
-                        results.append(item)
-            except Exception:
-                continue
-    return results[:max_results]
+    futs = [_SEARCH_EXECUTOR.submit(p, query, max_results, timeout) for p in providers]
+    for fut in concurrent.futures.as_completed(futs):
+        try:
+            for item in fut.result():
+                key = _canonical_url(item.url)
+                if key and key not in seen:
+                    seen.add(key)
+                    results.append(item)
+        except Exception:
+            continue
+    results = results[:max_results]
+
+    # Store in TTL cache
+    _SEARCH_CACHE[cache_key] = (now + _SEARCH_CACHE_TTL, results)
+    return results
 
 
 def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
+    session = _get_default_session()
+    resp = session.get(url, timeout=timeout)
     raw = resp.text
     items: list[SearchResult] = []
-    for block in re.findall(r'(?is)<div class="result results_links.*?</div>\s*</div>', raw):
-        href_match = re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
+    for block in _RE_DDG_RESULT.findall(raw):
+        href_match = _RE_DDG_HREF.search(block)
         if not href_match:
             continue
         href = html.unescape(href_match.group(1))
@@ -401,7 +479,7 @@ def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[
         if _is_duckduckgo_ad_url(href):
             continue
         snippet = ""
-        sn = re.search(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', block)
+        sn = _RE_DDG_SNIPPET.search(block)
         if sn:
             snippet = _clean_text(_strip_html(sn.group(1)))
         items.append(SearchResult(_clean_text(_strip_html(href_match.group(2))), href, snippet, "duckduckgo"))
@@ -417,14 +495,15 @@ def _is_duckduckgo_ad_url(url: str) -> bool:
         return False
     host = p.netloc.lower()
     qs = urllib.parse.parse_qs(p.query)
-    return host.endswith("duckduckgo.com") and (p.path.endswith("/y.js") or "ad_domain" in qs or "ad_provider" in qs)
+    return bool(_RE_AD_URL_HOST.search(host)) and (p.path.endswith("/y.js") or "ad_domain" in qs or "ad_provider" in qs)
 
 
 def _search_hn_algolia(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     url = "https://hn.algolia.com/api/v1/search?" + urllib.parse.urlencode(
         {"query": query, "tags": "story", "hitsPerPage": min(max_results, 10)}
     )
-    resp = requests.get(url, timeout=timeout)
+    session = _get_default_session()
+    resp = session.get(url, timeout=timeout)
     data = resp.json()
     items = []
     for hit in data.get("hits", []):
@@ -462,15 +541,15 @@ def research(query: str, *, max_results: int = 6, timeout: int = 20, max_chars: 
 
 
 def _answer_pack(query: str, sources: Iterable[FetchResult]) -> dict[str, Any]:
-    q_terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9]{3,}", query)}
+    q_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(query)}
     bullets = []
     for src in sources:
         if not src.text:
             continue
-        sentences = re.split(r"(?<=[.!?])\s+|\n+", src.text)
+        sentences = _RE_SENTENCE_SPLIT.split(src.text)
         ranked = []
         for s in sentences:
-            terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9]{3,}", s)}
+            terms = {t.lower() for t in _RE_TERM_TOKEN.findall(s)}
             overlap = len(q_terms & terms)
             if overlap and 60 <= len(s) <= 500:
                 ranked.append((overlap, len(s), s.strip()))

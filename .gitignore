@@ -5,3 +5,31 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Generated files
+agentweb-architecture.html
+benchmark.py
+
+# Hermes plans
+.hermes/
+
+# Backup files
+*.bak
+
+# Lock file
+uv.lock
+agentweb/api.py
+agentweb/auth_profile.py
+agentweb/ingest.py
+agentweb/mechanics.py
+agentweb/memory.py
+agentweb/orchestration.py
+agentweb/safety.py
+agentweb/stealth.py
+agentweb/storage.py
+agentweb/synthesis.py
