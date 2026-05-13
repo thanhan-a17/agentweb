@@ -423,9 +423,30 @@ def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
     return ""
 
 
-def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
+def search_web(query: str, *, max_results: int = 8, timeout: int = 20, broad: bool = True) -> list[SearchResult]:
+    """Search multiple diverse sources in parallel.
+
+    When ``broad=True`` (default), runs **5 providers** concurrently:
+    - DuckDuckGo HTML (general web)
+    - Jina Reader via DDG (cleaner results, bypasses bot-blocking)
+    - Hacker News Algolia API (tech & startup discussion)
+    - Reddit JSON API (community opinions, reviews, niche topics)
+    - GitHub Search API (open-source projects, code, tools, technical niches)
+    - X/Twitter via site operator (real-time discussion, announcements)
+
+    Results are **interleaved by source** for maximum diversity — the
+    returned list always represents as many sources as possible.
+    Deduplication is by canonical URL.
+
+    Set ``broad=False`` to use only the 3 core providers (DDG + Jina + HN)
+    for faster results on simple queries.
+    """
     providers = [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia]
-    results: list[SearchResult] = []
+    if broad:
+        providers.extend([_search_reddit_api, _search_github_api, _search_twitter_site])
+
+    # Collect all results from all providers — no early slot-filling
+    all_items: list[SearchResult] = []
     seen = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
         futs = [pool.submit(p, query, max_results, timeout) for p in providers]
@@ -435,10 +456,26 @@ def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[S
                     key = _canonical_url(item.url)
                     if key and key not in seen:
                         seen.add(key)
-                        results.append(item)
+                        all_items.append(item)
             except Exception:
                 continue
-    return results[:max_results]
+
+    # Interleave results by source for maximum diversity.
+    # This guarantees the output represents as many sources as possible
+    # instead of letting the first-finishing provider dominate.
+    by_source: dict[str, list[SearchResult]] = {}
+    for item in all_items:
+        src = item.source or "unknown"
+        by_source.setdefault(src, []).append(item)
+
+    interleaved: list[SearchResult] = []
+    while any(by_source.values()):
+        for src in list(by_source.keys()):
+            if by_source.get(src):
+                interleaved.append(by_source[src].pop(0))
+                if len(interleaved) >= max_results:
+                    return interleaved
+    return interleaved
 
 
 def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -749,9 +786,135 @@ def _search_jina_general(query: str, max_results: int, timeout: int) -> list[Sea
     return _search_via_jina_reader(query, max_results, timeout)
 
 
+def _search_github_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search GitHub repositories via the public search API.
+
+    No API key required (rate-limited to 60/hr without key, 10/min for
+    the search endpoint).  Returns repos with stars, description, and
+    language — excellent for technical/niche queries.
+
+    Source tag: "github"
+    """
+    url = "https://api.github.com/search/repositories?" + urllib.parse.urlencode(
+        {"q": query, "sort": "stars", "order": "desc", "per_page": min(max_results, 25)}
+    )
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": "AgentWeb/0.1",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            return []
+        data = resp.json()
+        items: list[SearchResult] = []
+        for repo in data.get("items", []):
+            name = repo.get("full_name", "") or repo.get("name", "")
+            repo_url = repo.get("html_url", "")
+            description = (repo.get("description") or "")[:200]
+            stars = repo.get("stargazers_count", 0)
+            language = repo.get("language") or ""
+            snippet = f"⭐ {stars} stars"
+            if language:
+                snippet += f" | {language}"
+            if description:
+                snippet = f"{description} — {snippet}"
+            if name and repo_url:
+                items.append(SearchResult(name, repo_url, snippet, "github"))
+            if len(items) >= max_results:
+                break
+        return items
+    except Exception:
+        return []
+
+
+def _search_reddit_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search Reddit using the public Reddit JSON API.
+
+    Returns real Reddit posts with title, URL, score, comments, and subreddit.
+    No API key required — Reddit's public JSON endpoint is free and accessible
+    with a proper User-Agent.
+
+    Rate limit: ~60 req/min unauthenticated.
+    """
+    url = "https://www.reddit.com/search.json?" + urllib.parse.urlencode(
+        {
+            "q": query,
+            "sort": "relevance",
+            "limit": min(max_results, 25),
+            "raw_json": 1,
+            "t": "all",
+        }
+    )
+    headers = {"User-Agent": "AgentWeb/0.1 (by /u/agentweb_search)"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            return []
+        data = resp.json()
+        items: list[SearchResult] = []
+        for child in data.get("data", {}).get("children", []):
+            d = child.get("data", {})
+            title = d.get("title", "")
+            permalink = d.get("permalink", "")
+            # Reddit post URL: external link for link posts, permalink for self posts
+            post_url = d.get("url", "")
+            if d.get("is_self") or not post_url or "reddit.com" in post_url.lower():
+                post_url = "https://www.reddit.com" + permalink
+            subreddit = d.get("subreddit", "")
+            score = d.get("score", 0)
+            comments = d.get("num_comments", 0)
+            # Build rich snippet
+            selftext = (d.get("selftext") or "")[:250]
+            sentence = (
+                selftext.replace("\n", " ").strip()
+                if selftext
+                else d.get("domain", "")
+            )
+            snippet = f"[r/{subreddit}] Score: {score} | Comments: {comments}"
+            if sentence:
+                snippet = f"{sentence[:200]} — {snippet}"
+            items.append(SearchResult(title, post_url, snippet, "reddit"))
+            if len(items) >= max_results:
+                break
+        return items
+    except Exception:
+        return []
+
+
 def _search_reddit_site(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     """Search Reddit via Jina general search with site:reddit.com operator."""
     site_query = f"site:reddit.com {query}"
+    return _search_jina_general(site_query, max_results, timeout)
+
+
+def _search_twitter_site(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search X/Twitter via DDG/Jina with site operators.
+
+    Twitter's API requires OAuth, so we use ``site:twitter.com OR site:x.com``
+    through DuckDuckGo HTML and Jina Reader in sequence.  Catches tweets
+    and X posts in search results.
+
+    Falls back cleanly with 0 results when Twitter content isn't indexed
+    (common with modern Twitter restrictions).  The other 4 providers in
+    the broad pipeline still deliver diverse results.
+
+    Returns: SearchResult list with source="twitter".
+    """
+    site_query = f"site:twitter.com OR site:x.com {query}"
+    # Try DDG HTML first (better for site: operator queries)
+    try:
+        results = _search_duckduckgo_html(site_query, max_results, timeout)
+        if results:
+            for r in results:
+                r.source = "twitter"
+            return results
+    except Exception:
+        pass
+    # Fallback: Jina Reader through DDG
     return _search_jina_general(site_query, max_results, timeout)
 
 
@@ -761,10 +924,13 @@ _SEARCH_PROVIDERS: dict[str, list] = {
     "hackernews": [_search_hn_algolia],
     "arxiv": [_search_arxiv_api],
     "wikipedia": [_search_wikipedia_api],
-    "reddit": [_search_reddit_site],
+    "reddit": [_search_reddit_api, _search_reddit_site],
+    "github": [_search_github_api],
+    "twitter": [_search_twitter_site],
+    "xcom": [_search_twitter_site],
     "bing": [_search_via_jina_reader],
     "jina": [_search_jina_general],
-    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia],
+    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia, _search_reddit_api],
 }
 
 

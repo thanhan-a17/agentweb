@@ -53,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=int, default=20)
     s.add_argument("--format", choices=["json", "markdown"], default="json")
     s.add_argument("--output", "-o")
+    s.add_argument("--no-broad", action="store_true", default=False,
+                    help="Use only core search engines (DDG + Jina + HN), skip Reddit/GitHub.")
 
     f = sub.add_parser("fetch", help="Fetch one URL using layered extraction tactics.")
     f.add_argument("url")
@@ -89,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "search":
-            results = [r.to_dict() for r in search_web(args.query, max_results=args.max_results, timeout=args.timeout)]
+            results = [r.to_dict() for r in search_web(args.query, max_results=args.max_results, timeout=args.timeout, broad=not args.no_broad)]
             if args.format == "markdown":
                 lines = [f"# AgentWeb search: {args.query}", ""]
                 for i, item in enumerate(results, 1):
