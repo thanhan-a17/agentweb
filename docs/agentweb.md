@@ -59,8 +59,8 @@ Options: `--max-results`, `--timeout`, `--max-chars`, `--refinement-loops`, `--f
 
 The JSON output includes a decomposition plan, executive summary, findings with sources, contradictions, and metadata.
 
-## LLM dependency
+## Zero external API dependencies
 
-AgentWeb operates with **zero LLM API calls by default**. All search, fetch, research, and deep-research commands are fully self-contained — no API key required, no LLM endpoint called.
+AgentWeb operates with **zero LLM API calls by default and no external API keys**. All search, fetch, research, and deep-research commands are fully self-contained — no API key required, no LLM endpoint called. The only external service used is Jina Reader (free, no key) for fallback content extraction on blocked pages.
 
-The output JSON is specifically designed for agent-side LLM processing: it includes the original query, search result snippets, full extracted page text, metadata, and keyword-matched evidence snippets. An external agent can perform its own summarization and synthesis from this raw data.
+The output JSON is designed for agent-side consumption: includes the original query, search result snippets, full extracted page text, metadata, and keyword-matched evidence snippets. If an external agent wants to synthesize a summary from this data, it can do so on its own.
