@@ -4,7 +4,14 @@ AgentWeb Deep Research — NO LLM ARCHITECTURE
 Inspired by: Claude (orchestrator-worker), ChatGPT (plan-then-execute), Perplexity (iterative refine).
 Constraint: Zero LLM API calls inside AgentWeb. All reasoning is classical NLP + graph algorithms.
 
-This module lives at agentweb/deep_research.py and is imported by cli.py as a new command.
+Semantic Routing (new in 0.1.7):
+  Uses SemanticRouter to classify queries into provider categories (arXiv, HN,
+  Wikipedia, Reddit) via term-overlap scoring with multi-word phrase bonuses.
+  Falls back to general web search (Jina Search API + DuckDuckGo) when no
+  category scores above the 0.10 threshold — fixing the "H1 centro americano
+  coffee" class of failures where keyword-only routing returned nothing.
+
+This module lives at agentweb/deep_research.py and is imported by cli.py.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, NamedTuple
 
 # AgentWeb's own imports
-from agentweb.core import fetch_url, search_web, FetchResult, SearchResult
+from agentweb.core import fetch_url, search_by_provider, search_web, FetchResult, SearchResult
 from agentweb.safety import InputGuard
 
 # ─── Shared regexes ──────────────────────────────────────────────────────────
@@ -80,6 +87,164 @@ _RE_STOP_WORDS = re.compile(
     re.I,
 )
 _RE_WHITESPACE = re.compile(r"\s+")
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SEMANTIC ROUTER — classify queries into provider categories
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class SemanticRouter:
+    """Classify queries into search provider categories using term-overlap scoring.
+
+    Zero external dependencies — uses token overlap + phrase matching between the
+    query and each category's seed profile.  If no category scores above the
+    fallback threshold, routes to ``"general"`` web search.
+
+    Design:
+    - **Single-word seeds** matched against query tokens (2+ chars, no stopwords)
+    - **Multi-word seeds** matched as exact substrings against the query
+    - Short meaningful tokens (``hn``, ``ai``, ``yc``) are captured by the 2-char
+      minimum — common English 2-letter words are in the stopword list.
+    """
+
+    # Custom short-token regex: 2+ chars (3+ is too restrictive for HN, AI, YC, etc.)
+    _RE_TOKEN = re.compile(r"[a-zA-Z0-9]{2,}")
+
+    # Seed terms per provider category.
+    # Single words: matched against query tokens (2+ chars, filtered).
+    # Multi-word phrases: matched exactly against query (substring check).
+    CATEGORY_SEEDS: dict[str, set[str]] = {
+        "arxiv": {
+            "paper", "research", "study", "academic", "preprint",
+            "publication", "scientific", "scholar", "doi", "proceedings",
+            "conference", "journal", "experiment", "methodology",
+            "benchmark", "dataset", "novel", "theory", "algorithm",
+            "sota", "pretrained", "fine", "tune", "architecture", "corpus",
+            "llm", "transformer", "nlp",
+            "state of the art", "we propose", "results show",
+            "empirical", "evaluation", "neural network",
+            "deep learning", "computer vision", "reinforcement learning",
+            "machine learning",
+        },
+        "hackernews": {
+            "hackernews", "startup", "founder", "venture", "launch",
+            "bootstrapped", "indie", "postmortem", "pivot",
+            "ycombinator",
+            "hacker news", "y combinator",
+            "series a", "side project", "build in public",
+            "tech crunch", "startup school", "seed round",
+            "show hn", "ask hn", "hn",
+        },
+        "wikipedia": {
+            "history", "definition", "overview", "background",
+            "meaning", "explain", "define", "origin", "etymology",
+            "biography", "geography", "capital", "population",
+            "timeline", "concept", "terminology", "located", "born",
+            "founded", "demographics", "country", "continent",
+            "what is", "who is", "where is", "also known as",
+        },
+        "reddit": {
+            "reddit", "subreddit", "opinion", "review",
+            "recommendation", "discussion", "advice",
+            "troubleshooting", "suggestion",
+            "ama", "eli5", "tifu", "aita",
+            "anyone else", "thoughts on", "what do you think",
+            "does anyone", "has anyone", "experience with",
+            "worth it",
+        },
+    }
+
+    # Common English words that shouldn't count as meaningful matches
+    _STOPWORDS: frozenset[str] = frozenset({
+        "the", "and", "for", "are", "but", "not", "you", "all", "can",
+        "was", "one", "our", "out", "get", "has", "him", "his", "how",
+        "its", "may", "new", "now", "old", "see", "two", "way", "who",
+        "did", "she", "use", "via", "that", "from", "have", "been",
+        "were", "said", "also", "they", "this", "what", "than",
+        "with", "their", "about", "into", "over", "after", "some",
+        "more", "most", "much", "many", "very", "just", "like",
+        "do", "it", "is", "be", "to", "of", "in", "on", "at",
+        "by", "as", "an", "or", "if", "so", "up", "no", "we",
+        "he", "she", "my", "me", "go", "am", "pm",
+    })
+
+    _GENERAL_FALLBACK_THRESHOLD = 0.10
+
+    @classmethod
+    def _tokenize(cls, text: str) -> set[str]:
+        """Extract meaningful tokens (2+ chars, no stopwords)."""
+        return {m.group().lower() for m in cls._RE_TOKEN.finditer(text)
+                if m.group().lower() not in cls._STOPWORDS}
+
+    def classify(self, query: str) -> list[tuple[str, float]]:
+        """Classify a query into provider categories.
+
+        Returns a list of ``(provider_name, confidence)`` pairs sorted by
+        confidence descending.  ``"general"`` is always included as a
+        last-resort provider.
+        """
+        query_lower = query.lower()
+        tokens = self._tokenize(query_lower)
+        num_tokens = len(tokens)
+
+        if not tokens:
+            return [("general", 1.0)]
+
+        scores: list[tuple[str, float]] = []
+        for provider, seeds in self.CATEGORY_SEEDS.items():
+            word_hits = 0
+            phrase_hits = 0
+
+            for seed in seeds:
+                seed_lower = seed.lower()
+                if " " in seed:
+                    # Multi-word seed: exact phrase match
+                    if seed_lower in query_lower:
+                        phrase_hits += 1
+                else:
+                    # Single-word seed: token match
+                    if len(seed_lower) >= 2 and seed_lower not in self._STOPWORDS:
+                        if seed_lower in tokens:
+                            word_hits += 1
+
+            # Score: fraction of query tokens matched + capped phrase bonus
+            word_frac = word_hits / num_tokens
+            phrase_frac = min(phrase_hits, 3) / 3  # capped at 3 phrases
+
+            # Weighted: words 60%, phrases 40%
+            total = min(word_frac * 0.6 + phrase_frac * 0.4, 1.0)
+            scores.append((provider, round(total, 4)))
+
+        # Sort by confidence desc
+        scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Below threshold -> route purely to general web search
+        if scores[0][1] < self._GENERAL_FALLBACK_THRESHOLD:
+            return [("general", 1.0)]
+
+        # Return all providers within 30% of the top score
+        top_score = scores[0][1]
+        result = [(p, s) for p, s in scores if s >= top_score * 0.3]
+
+        # Always append general as a co-provider for safety
+        if not any(p == "general" for p, _ in result):
+            result.append(("general", self._GENERAL_FALLBACK_THRESHOLD))
+
+        return result
+_ROUTER = SemanticRouter()  # module-level singleton
+
+
+def semantic_route_providers(query: str) -> list[str]:
+    """Route a query to providers using the SemanticRouter.
+
+    Returns a deduplicated list of provider names ordered by confidence.
+    Always includes a general web search fallback.
+    """
+    classified = _ROUTER.classify(query)
+    return [p for p, _ in classified]
 
 
 def _simplify_query(query: str) -> str:
@@ -316,22 +481,35 @@ AUTHORITATIVE_DOMAINS: dict[str, float] = {
 
 
 def route_providers(query: str, intent: str) -> list[str]:
-    """Pick the 2–4 best providers for this query intent."""
-    # Base provider always included
-    providers = ["duckduckgo"]
+    """Pick the best providers for this query.
 
-    # Add intent-specific providers
-    if intent in ("factual", "interrogative"):
-        providers.append("wikipedia")
-        providers.append("hackernews")  # HN matches tech-focused factual queries well
-    if intent in ("list", "comparison"):
-        providers.append("reddit")
-    if any(t in query.lower() for t in ["research", "paper", "study", "academic", "science"]):
-        providers.extend(["arxiv", "arxiv_"])
-    if any(t in query.lower() for t in ["startup", "product", "launch", "tech", "hacker"]):
-        providers.append("hackernews")
-    if intent == "comparison":
-        providers.append("reddit")
+    Uses the SemanticRouter to classify the query by term overlap with
+    each category's seed profile.  Falls back to intent-based heuristics
+    when semantic confidence is low.
+
+    Always includes a general web search provider as a safety net.
+    """
+    # Semantic classification
+    semantic = _ROUTER.classify(query)
+
+    # Extract provider names sorted by confidence
+    providers: list[str] = []
+    seen: set[str] = set()
+    for provider, confidence in semantic:
+        if provider not in seen:
+            seen.add(provider)
+            providers.append(provider)
+
+    # If semantic only gave "general", supplement with intent-based hints
+    if providers == ["general"]:
+        if intent in ("factual", "interrogative"):
+            providers.append("wikipedia")
+        if intent in ("list", "comparison"):
+            providers.append("reddit")
+        if any(t in query.lower() for t in ["paper", "research", "academic", "science", "arxiv"]):
+            providers.append("arxiv")
+        if any(t in query.lower() for t in ["startup", "hacker", "tech", "launch"]):
+            providers.append("hackernews")
 
     return list(dict.fromkeys(providers))  # deduplicate preserving order
 
@@ -353,7 +531,7 @@ class SubAgentResult:
 def _extract_entities(text: str) -> list[dict]:
     """
     Extract named entities and structured facts without LLM.
-    Uses regex patterns + capitalization heuristics + numeric extraction.
+    Uses regex patterns + capitalization heuristics + numeric extraction + table parsing.
     """
     facts = []
 
@@ -376,33 +554,99 @@ def _extract_entities(text: str) -> list[dict]:
         facts.append({"type": "date", "value": match.group(), "context": text[ctx_start:ctx_end]})
 
     # Extract numbers with units
-    number_pattern = re.compile(
-        r"\b(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|billion|million|thousand|"
-        r"dollars?|users?|customers?|times|daily|monthly|yearly|years?)\b",
-        re.I,
-    )
-    for match in number_pattern.finditer(text):
+    for match in _RE_STAT.finditer(text):
         facts.append({"type": "stat", "value": match.group(), "context": text[max(0, match.start() - 20) : min(len(text), match.end() + 20)]})
+
+    # Extract currency values ($X, $X.XX)
+    for match in _RE_PRICE.finditer(text):
+        facts.append({"type": "stat", "value": match.group(), "context": text[max(0, match.start() - 20) : min(len(text), match.end() + 20)]})
+
+    # Extract markdown table rows (pipe-delimited) — each row is a structured fact
+    # The first row is the header; subsequent rows contain data
+    lines = text.splitlines()
+    in_table = False
+    header_cells: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.split("|")[1:-1]]
+            if len(cells) >= 2:
+                if not in_table:
+                    # This is the header row
+                    header_cells = cells
+                    in_table = True
+                else:
+                    # Skip separator rows (| --- | --- |)
+                    if all(c.replace("-", "").replace(":", "").strip() == "" for c in cells):
+                        continue
+                    # Data row: extract each cell as a fact
+                    for i, cell in enumerate(cells):
+                        if i < len(header_cells) and header_cells[i] and cell:
+                            key = header_cells[i].strip()
+                            if len(cell) > 1 and len(cell) < 80 and cell != key:
+                                facts.append({
+                                    "type": "table_cell",
+                                    "value": cell,
+                                    "field": key,
+                                    "context": f"{key}: {cell}",
+                                })
+        else:
+            in_table = False
+            header_cells = []
+
+    # Extract key-value patterns: "Key: Value" or "Key — Value" where Value is meaningful
+    for match in re.finditer(r"([A-Za-z][A-Za-z\s]{2,30}?)\s*[:]\s*(.{1,80})\s*$", text, re.MULTILINE):
+        key = match.group(1).strip()
+        val = match.group(2).strip()
+        if key and val and len(key) > 2 and len(val) > 1:
+            # Skip if key looks like a time, URL, or known boilerplate
+            if not val.startswith("http") and not re.match(r"^\d{1,2}:\d{2}", val):
+                facts.append({
+                    "type": "key_value",
+                    "value": val,
+                    "field": key,
+                    "context": f"{key}: {val}",
+                })
 
     return facts
 
 
 def _coverage_score(query: SubQuery, fetched: list[FetchResult]) -> float:
-    """Score how well a set of results covers the sub-query topic."""
+    """Score how well fetched results cover the sub-query topic.
+
+    Uses term overlap density (not just presence) and intent-aware checks.
+    Range 0.0–1.0. No inflation multipliers.
+    """
     if not fetched:
         return 0.0
     query_terms = query.parent_terms or {t.lower() for t in _RE_TERM_TOKEN.findall(query.text)}
+    if not query_terms:
+        return 0.5  # neutral if no terms to match
 
     scores = []
     for r in fetched:
-        if not r.text:
+        if not r.text or len(r.text.strip()) < 200:
             continue
         result_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(r.text)}
+        if not result_terms:
+            continue
+        # Overlap fraction
         overlap = len(query_terms & result_terms)
         max_possible = len(query_terms)
-        scores.append(overlap / max_possible if max_possible else 0)
+        overlap_frac = overlap / max_possible if max_possible else 0
 
-    return min(1.0, sum(scores) / len(scores) * 1.5)
+        # Density: how many total query term occurrences per 1000 chars
+        text_lower = r.text.lower()
+        term_density = sum(text_lower.count(t) for t in query_terms) / max(1, len(text_lower) / 1000)
+        density_factor = min(term_density / 10.0, 1.0)  # 10+ occurrences/1K chars = max
+
+        # Combined: 60% overlap presence, 40% density
+        combined = overlap_frac * 0.6 + density_factor * 0.4
+        scores.append(combined)
+
+    if not scores:
+        return 0.0
+    return min(1.0, sum(scores) / len(scores))
 
 
 def run_subagent(
@@ -421,38 +665,47 @@ def run_subagent(
     all_results: list[SearchResult] = []
     for provider in providers[:3]:  # cap at 3 providers per sub-agent
         try:
-            results = search_web(sub_query.text, max_results=5, timeout=timeout)
+            results = search_by_provider(provider, sub_query.text, max_results=5, timeout=timeout)
             all_results.extend(results)
         except Exception as exc:
             warnings.append(f"provider_{provider}_error:{exc}")
 
-    # ── Zero-result fallback: retry with extracted keywords ──────────────
+    # ── Zero-result fallback chain ──────────────────────────────────────
+    # Fallback 1: retry with extracted keywords on a general provider
     if not all_results:
         keyword_q = _extract_keywords(sub_query.text)
         if keyword_q and keyword_q != sub_query.text:
             try:
-                kw_results = search_web(keyword_q, max_results=5, timeout=timeout)
+                kw_results = search_by_provider("general", keyword_q, max_results=5, timeout=timeout)
                 if kw_results:
                     all_results.extend(kw_results)
                     warnings.append(f"keyword_fallback:used '{keyword_q}'")
             except Exception as exc:
                 warnings.append(f"keyword_fallback_error:{exc}")
 
-    # ── Second fallback for factual intent: bare-minimum keywords ────────
+    # Fallback 2: try Jina Search (handles JS-rendered pages better)
+    if not all_results:
+        try:
+            jina_results = search_by_provider("jina", sub_query.text, max_results=5, timeout=timeout)
+            if jina_results:
+                all_results.extend(jina_results)
+                warnings.append("jina_fallback:used Jina Search")
+        except Exception as exc:
+            warnings.append(f"jina_fallback_error:{exc}")
+
+    # Fallback 3: bare-minimum keywords on general (for short, factual queries)
     if not all_results and sub_query.intent == "factual":
-        # Extract only the most meaningful terms (3+ chars, not stopwords)
         min_keywords = _extract_keywords(sub_query.text)
-        # Fall back to just the first 4 meaningful words
         kw_parts = min_keywords.split()
         if len(kw_parts) > 3:
             short_q = " ".join(kw_parts[:4])
             try:
-                hn_results = search_web(short_q, max_results=5, timeout=timeout)
+                hn_results = search_by_provider("general", short_q, max_results=5, timeout=timeout)
                 if hn_results:
                     all_results.extend(hn_results)
-                    warnings.append(f"hn_factual_fallback:used '{short_q}'")
+                    warnings.append(f"factual_short_fallback:used '{short_q}'")
             except Exception as exc:
-                warnings.append(f"hn_factual_fallback_error:{exc}")
+                warnings.append(f"factual_short_fallback_error:{exc}")
 
     # 2. Deduplicate by canonical URL
     seen_urls: set[str] = set()
@@ -626,6 +879,39 @@ class EvidenceClaim:
     is_contradictory: bool = False  # set by contradiction detector
 
 
+# Regex for broader stat detection (numbers, prices, percentages, scores)
+_RE_STAT = re.compile(
+    r"\b(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|million|billion|thousand|dollars?|usd|"
+    r"points?|score|rating|rank|users?|requests?)\b",
+    re.I,
+)
+_RE_PRICE = re.compile(r"\$\s*\d+(?:,\d{3})*(?:\.\d+)?")
+_RE_TABLE_ROW = re.compile(
+    r"^\|\s*.+\|.*$", re.MULTILINE
+)  # markdown table row
+_RE_NUMBER = re.compile(r"\b\d+(?:\.\d+)?\b")
+
+
+def _is_nav_or_title_sentence(sent: str) -> bool:
+    """Return True if sentence looks like a page title, nav label, or menu item."""
+    low = sent.lower().strip()
+    # Single phrase with no verb and <8 words that ends without punctuation
+    if len(sent.split()) <= 6 and not any(c in sent for c in [",", ";", ":", " — ", " – "]):
+        if re.match(r"^[A-Z][a-zA-Z\s\-'<=>]{2,60}$", sent.strip()):
+            return True
+    # Known nav/filter patterns
+    nav_patterns = [
+        "default order", "vfm sort", "best <=", "best ≤", "sort by", "filter by",
+        "skip to content", "menu", "subscribe", "sign in", "log in",
+        "load more", "show more", "click here", "read more",
+        "default order best", "value for money",
+    ]
+    for pat in nav_patterns:
+        if pat in low:
+            return True
+    return False
+
+
 def extract_evidence(
     scored_sources: list[ScoredSource],
     query: str,
@@ -637,7 +923,8 @@ def extract_evidence(
     1. Score every sentence in every source using BM25 overlap with query
     2. Deduplicate near-identical sentences (hash-based)
     3. Boost sentences with entities, statistics, dates
-    4. Select top-N by composite score
+    4. Penalize short/nav/title sentences
+    5. Select top-N by composite score
     """
     q_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(query)}
     intent_terms = {"factual": ["report", "found", "discovered", "announced", "revealed"],
@@ -656,7 +943,7 @@ def extract_evidence(
             continue
         for sent in _RE_SENTENCE_SPLIT.split(fr.text):
             sent = sent.strip()
-            if len(sent) < 30 or len(sent) > 600:
+            if len(sent) < 25 or len(sent) > 700:
                 continue
             # Deduplicate by sentence hash
             h = hashlib.md5(sent.lower().encode()).hexdigest()[:12]
@@ -664,17 +951,40 @@ def extract_evidence(
                 continue
             seen_hashes.add(h)
 
+            # Skip nav/title/menu sentences entirely
+            if _is_nav_or_title_sentence(sent):
+                continue
+
             s_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(sent)}
+            s_len = len(sent)
             overlap = len(q_terms & s_terms)
             boost = len(boost_terms & s_terms)
             entity_count = len(_RE_ENTITY_CAPTURE.findall(sent))
-            stat_count = len(re.findall(r"\d+(?:\.\d+)?%", sent))
+            stat_count = len(_RE_STAT.findall(sent))
+            price_count = len(_RE_PRICE.findall(sent))
+            table_row = 1 if _RE_TABLE_ROW.match(sent) else 0
+            num_count = len(_RE_NUMBER.findall(sent))
 
-            # Composite relevance score
-            relevance = (overlap * 1.0) + (boost * 0.5) + (entity_count * 0.3) + (stat_count * 0.4)
-            relevance = relevance / max(1, len(s_terms))
+            # Base relevance: overlap density
+            base = overlap / max(1, len(s_terms)) if overlap > 0 else 0
 
-            if overlap > 0:
+            # Boost signals for substantive content
+            substantive = (stat_count * 0.8) + (price_count * 0.8) + (entity_count * 0.15) + (num_count * 0.15)
+            intent_boost = (boost / max(1, len(s_terms))) * 0.5
+            table_boost = table_row * 0.5
+
+            # Length penalty: sentences <60 chars are suspicious (nav/title)
+            length_penalty = 0.0
+            if s_len < 60:
+                length_penalty = -0.3
+            elif s_len < 100:
+                length_penalty = -0.1
+
+            # Composite relevance score — meaningful range 0.0–~2.5
+            relevance = base + substantive + intent_boost + table_boost + length_penalty
+            relevance = max(0.0, relevance)
+
+            if overlap > 0 and relevance > 0:
                 all_sentences.append((sent, fr, relevance))
 
     # Sort by relevance and pick top-N
@@ -682,8 +992,10 @@ def extract_evidence(
 
     claims: list[EvidenceClaim] = []
     for sent, fr, relevance in all_sentences[:max_claims]:
-        # Classify claim type
-        if re.search(r"\d+(?:\.\d+)?%", sent) or re.search(r"\d+ (million|billion|thousand)", sent, re.I):
+        # Classify claim type — more aggressive stat detection
+        if (re.search(r"\d+(?:\.\d+)?%", sent)
+            or re.search(r"\$\s*\d+(?:,\d{3})*(?:\.\d+)?", sent)
+            or re.search(r"\d+(?:,\d{3})*(?:\.\d+)?\s*(million|billion|thousand|users|requests?|points?)", sent, re.I)):
             claim_type = "stat"
         elif _RE_YEAR.search(sent):
             claim_type = "date"
@@ -714,7 +1026,7 @@ def extract_evidence(
 def detect_contradictions(claims: list[EvidenceClaim]) -> list[tuple[EvidenceClaim, EvidenceClaim]]:
     """
     Find pairs of claims that likely contradict each other.
-    Zero LLM: uses numeric divergence + opposing keyword detection.
+    Zero LLM: uses numeric divergence + opposing keyword detection + entity-value conflicts.
     """
     OPPOSING_PAIRS = [
         ("increase", "decrease"),
@@ -726,44 +1038,51 @@ def detect_contradictions(claims: list[EvidenceClaim]) -> list[tuple[EvidenceCla
         ("supports", "opposes"),
         ("agree", "disagree"),
         ("yes", "no"),
+        ("best", "worst"),
+        ("leader", "laggard"),
+        ("cheaper", "expensive"),
+        ("faster", "slower"),
     ]
 
     contradictions = []
     for i, c1 in enumerate(claims):
         for c2 in claims[i + 1 :]:
             s1, s2 = c1.sentence.lower(), c2.sentence.lower()
-            # Check for numeric divergence on same stat
-            nums1 = re.findall(r"\d+(?:\.\d+)?%", s1)
-            nums2 = re.findall(r"\d+(?:\.\d+)?%", s2)
-            if nums1 and nums2:
-                # Numeric divergence: same stat type (percentage or raw number) diverging > 30pp
-                # nums1/nums2 are already extracted WITH the % sign intact
-                has_pct1 = "%" in nums1[0]
-                has_pct2 = "%" in nums2[0]
-                if has_pct1 == has_pct2:
-                    try:
-                        v1 = float(nums1[0].replace("%", ""))
-                        v2 = float(nums2[0].replace("%", ""))
-                        diff = abs(v1 - v2)
-                        if has_pct1 and diff > 30:
-                            # Compute semantic overlap: strip stopwords and compare content words
-                            STOPWORDS = {"the","and","for","are","but","not","you","all","can","her",
-                                         "was","one","our","out","day","get","has","him","his","how",
-                                         "its","may","new","now","old","see","two","way","who","boy",
-                                         "did","she","use","via","com","net","org","http","https","www",
-                                         "that","from","have","been","were","said","also","they","this",
-                                         "what","than","has","with","their","about","into","over","after"}
-                            s1_words = {w for w in s1.split() if w not in STOPWORDS and len(w) > 2}
-                            s2_words = {w for w in s2.split() if w not in STOPWORDS and len(w) > 2}
-                            overlap = len(s1_words & s2_words) / max(1, min(len(s1_words), len(s2_words)))
-                            if overlap > 0.25:
-                                contradictions.append((c1, c2))
-                                c1.is_contradictory = True
-                                c2.is_contradictory = True
-                                continue
-                    except ValueError:
-                        pass
-            # Check for opposing keywords
+
+            # ── Numeric divergence on same entity/metric ────────────────
+            # Extract all (number, entity_context) pairs from each sentence
+            nums1 = re.findall(r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|\$|million|billion|thousand)?", s1, re.I)
+            nums2 = re.findall(r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|\$|million|billion|thousand)?", s2, re.I)
+            # Extract entities for context matching
+            ents1 = _RE_ENTITY_CAPTURE.findall(s1)
+            ents2 = _RE_ENTITY_CAPTURE.findall(s2)
+            shared_entities = set(e.lower() for e in ents1) & set(e.lower() for e in ents2)
+
+            if nums1 and nums2 and (shared_entities or (len(nums1) == 1 and len(nums2) == 1)):
+                # Try comparing percentage values
+                pcts1 = [float(n[0].replace(",", "")) for n in nums1 if n[1] == "%"]
+                pcts2 = [float(n[0].replace(",", "")) for n in nums2 if n[1] == "%"]
+                if pcts1 and pcts2:
+                    diff = abs(max(pcts1) - max(pcts2))
+                    if diff > 15 and shared_entities:
+                        contradictions.append((c1, c2))
+                        c1.is_contradictory = True
+                        c2.is_contradictory = True
+                        continue
+                # Try comparing raw numbers on same entity topic
+                raw1 = [float(n[0].replace(",", "")) for n in nums1]
+                raw2 = [float(n[0].replace(",", "")) for n in nums2]
+                if shared_entities and len(raw1) == 1 and len(raw2) == 1:
+                    large = max(raw1[0], raw2[0])
+                    if large > 0:
+                        pct_diff = abs(raw1[0] - raw2[0]) / large * 100
+                        if pct_diff > 30:
+                            contradictions.append((c1, c2))
+                            c1.is_contradictory = True
+                            c2.is_contradictory = True
+                            continue
+
+            # ── Opposing keywords ─────────────────────────────────────
             for pos, neg in OPPOSING_PAIRS:
                 if pos in s1 and neg in s2:
                     contradictions.append((c1, c2))
@@ -829,11 +1148,28 @@ def build_report(
     template = INTENT_TEMPLATES.get(plan.intent, INTENT_TEMPLATES["general"])
 
     # ── 1. Executive Summary ──────────────────────────────────────────────
-    # Extract summary from top 3 ranked sentences (no LLM paraphrasing)
-    exec_sents = [c.sentence for c in claims[:5] if c.relevance_score > 0]
-    exec_summary = " ".join(exec_sents[:3]) if exec_sents else "No high-confidence findings retrieved."
-    if len(exec_summary) > 600:
-        exec_summary = exec_summary[:597].rsplit(" ", 1)[0] + "..."
+    # Pick substantive sentences: prefer stats, longer content, diverse sources
+    exec_candidates = [c for c in claims[:10] if not _is_nav_or_title_sentence(c.sentence) and len(c.sentence) > 60]
+    if not exec_candidates:
+        exec_candidates = [c for c in claims[:15] if len(c.sentence) > 40 and not _is_nav_or_title_sentence(c.sentence)]
+    if not exec_candidates:
+        exec_candidates = claims[:5]
+
+    # Pick up to 3 sentences, preferring stat types and diversity of sources
+    exec_sents = []
+    seen_urls = set()
+    for c in exec_candidates:
+        if len(exec_sents) >= 3:
+            break
+        key = c.source_url.split("?")[0].rstrip("/")
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        exec_sents.append(c.sentence)
+
+    exec_summary = " ".join(exec_sents) if exec_sents else "No substantive findings retrieved."
+    if len(exec_summary) > 800:
+        exec_summary = exec_summary[:797].rsplit(" ", 1)[0] + "..."
 
     # ── 2. Key Findings ──────────────────────────────────────────────────
     # Group claims by type, pick highest-scored per type
@@ -1147,6 +1483,27 @@ def deep_research(
 
     # 5. Extract evidence
     claims = extract_evidence(scored_sources, query, plan.intent, max_claims=20)
+
+    # 5b. Add structured facts from table/key-value extraction
+    table_claims: list[EvidenceClaim] = []
+    seen_table_keys: set[str] = set()
+    for sr in sub_results:
+        for fact in sr.entity_facts:
+            if fact["type"] in ("table_cell", "key_value"):
+                key = f"{fact.get('field','')}:{fact['value']}"
+                h = hashlib.md5(key.lower().encode()).hexdigest()[:12]
+                if h not in seen_table_keys:
+                    seen_table_keys.add(h)
+                    table_claims.append(EvidenceClaim(
+                        sentence=fact.get("context", fact["value"]),
+                        source_url="",
+                        source_title="",
+                        claim_type="stat" if re.search(r"\d", fact["value"]) else "fact",
+                        relevance_score=0.5,
+                    ))
+    # Merge with sentence-level claims, keeping top-N by relevance
+    all_claims = sorted(claims + table_claims, key=lambda c: c.relevance_score, reverse=True)
+    claims = all_claims[:20]
 
     # 6. Detect contradictions
     contradictions = detect_contradictions(claims)
