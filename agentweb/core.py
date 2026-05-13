@@ -7,6 +7,7 @@ readability extraction, browser fallbacks, and weird SPA payloads itself.
 
 from __future__ import annotations
 
+import base64
 import concurrent.futures
 import email.utils
 import html
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
@@ -54,20 +56,54 @@ class FetchResult:
     elapsed_ms: int = 0
 
     def quality_score(self) -> float:
+        """Score page quality on a 0–10 scale.
+
+        Differentiating factors:
+        - ok + 2.0
+        - title + 0.5
+        - text length bonus: up to 4.0 for content-rich pages
+        - content density: penalize pages with high link-to-text ratio
+        - content uniqueness: reward pages with higher unique-content ratio
+        - penalties for bot blocks, warnings, error status codes
+        """
         score = 0.0
         if self.ok:
             score += 2.0
         if self.title:
-            score += 0.4
+            score += 0.5
         text_len = len(self.text.strip())
-        score += min(text_len / 2500.0, 3.0)
+        # Text bonus: scales from 0 to 4.0, diminishing returns after 10K chars
+        score += min(text_len / 2500.0, 4.0)
+        # Links: high link density = chrome/nav page
         if self.links:
-            score += 0.2
+            score += 0.3
+            link_density = len(self.links) / max(1, min(text_len, 20000) / 1000.0)
+            if link_density > 2.0:  # >2 links per 1K chars = nav-heavy
+                score -= 0.3
+            if link_density > 4.0:
+                score -= 0.5
+        # Content uniqueness: unique line ratio
+        if text_len > 500:
+            lines = self.text.splitlines()
+            unique_lines = set()
+            total_content_lines = 0
+            for line in lines:
+                stripped = line.strip().lower()
+                if len(stripped) > 10:
+                    total_content_lines += 1
+                    unique_lines.add(stripped)
+            if total_content_lines > 3:
+                unique_ratio = len(unique_lines) / total_content_lines
+                if unique_ratio < 0.4:  # heavily repetitive
+                    score -= 1.0
+                elif unique_ratio < 0.7:
+                    score -= 0.3
+        # Penalties
         if any("block" in w.lower() or "captcha" in w.lower() for w in self.warnings):
-            score -= 1.5
+            score -= 2.0
         if self.status_code and self.status_code >= 400:
-            score -= 1.0
-        return score
+            score -= 1.5
+        return max(0.0, min(score, 10.0))
 
     def to_dict(self, max_chars: int = 12000) -> dict[str, Any]:
         text = self.text.strip()
@@ -132,6 +168,27 @@ def _timeout_wrapper(fn, timeout: int):
         return fn(method, url, **kwargs)
 
     return wrapped
+
+
+def _get_default_session() -> requests.Session:
+    """Return a shared session with connection pooling and standard headers."""
+    global _DEFAULT_SESSION
+    if _DEFAULT_SESSION is None:
+        s = requests.Session()
+        s.headers.update(
+            {
+                "User-Agent": USER_AGENTS[0],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "DNT": "1",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
+        _DEFAULT_SESSION = s
+    return _DEFAULT_SESSION
+
+
+_DEFAULT_SESSION: requests.Session | None = None
 
 
 def _safe_url(url: str) -> str:
@@ -367,7 +424,7 @@ def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
 
 
 def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
-    providers = [_search_duckduckgo_html, _search_hn_algolia]
+    providers = [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia]
     results: list[SearchResult] = []
     seen = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
@@ -526,4 +583,216 @@ def format_markdown_research(pack: dict[str, Any]) -> str:
             parts.append(f"Warnings: {', '.join(src['warnings'])}")
         text = src.get("text") or ""
         parts.append("\n" + text[:2500].strip())
-    return "\n".join(parts).strip() + "\n"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PROVIDER-SPECIFIC SEARCH
+# ═══════════════════════════════════════════════════════════════════
+
+# Regex for cleaning arXiv XML text
+_RE_ARXIV_CLEAN = re.compile(r"<[^>]+>")
+_RE_MULTISPACE = re.compile(r"\s+")
+
+
+def _search_arxiv_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search arXiv API for academic papers. Returns SearchResult list."""
+    url = (
+        "http://export.arxiv.org/api/query?"
+        + urllib.parse.urlencode(
+            {"search_query": f"all:{query}", "start": 0, "max_results": min(max_results, 10)}
+        )
+    )
+    try:
+        session = _get_default_session()
+        resp = session.get(url, timeout=timeout)
+        if resp.status_code >= 400:
+            return []
+        root = ET.fromstring(resp.text)
+        ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+        items: list[SearchResult] = []
+        for entry in root.findall("a:entry", ns):
+            title_el = entry.find("a:title", ns)
+            title = _clean_text(_RE_ARXIV_CLEAN.sub("", (title_el.text or ""))) if title_el is not None else ""
+            id_el = entry.find("a:id", ns)
+            url_text = id_el.text.strip() if id_el is not None and id_el.text else ""
+            summary_el = entry.find("a:summary", ns)
+            summary = ""
+            if summary_el is not None and summary_el.text:
+                summary = _clean_text(_RE_ARXIV_CLEAN.sub(" ", summary_el.text))[:300]
+            if title and url_text:
+                items.append(SearchResult(title, url_text, summary, "arxiv"))
+        return items[:max_results]
+    except Exception:
+        return []
+
+
+def _search_wikipedia_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search Wikipedia opensearch API."""
+    url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
+        {
+            "action": "opensearch",
+            "search": query,
+            "limit": min(max_results, 10),
+            "namespace": 0,
+            "format": "json",
+        }
+    )
+    try:
+        session = _get_default_session()
+        resp = session.get(url, timeout=timeout)
+        data = resp.json()
+        if not data or len(data) < 4:
+            return []
+        titles, urls, descriptions = data[1], data[3], data[2] if len(data) > 2 else []
+        items: list[SearchResult] = []
+        for i, title in enumerate(titles):
+            page_url = urls[i] if i < len(urls) else ""
+            snippet = descriptions[i] if i < len(descriptions) else ""
+            if title and page_url:
+                items.append(SearchResult(title, page_url, snippet, "wikipedia"))
+        return items[:max_results]
+    except Exception:
+        return []
+
+
+def _decode_bing_url(url: str) -> str:
+    """Extract the actual destination URL from a Bing/DDG tracking redirect URL.
+
+    Bing wraps search-result links in ``bing.com/ck/a?...`` URLs with a
+    base64-encoded real URL in the ``u`` query parameter (prefixed by 2
+    salt bytes).  DuckDuckGo uses ``duckduckgo.com/l/?uddg=<urlencode>``.
+    Falls back to the original URL on any parse failure.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        # DuckDuckGo: uddg param
+        uddg = qs.get("uddg", [None])[0]
+        if uddg:
+            decoded = urllib.parse.unquote(uddg)
+            if decoded.startswith("http"):
+                return decoded
+        # Bing: base64 u param with 2-char prefix
+        u_val = qs.get("u", [None])[0]
+        if u_val and len(u_val) > 2:
+            b64 = u_val[2:]
+            padding = 4 - len(b64) % 4
+            if padding != 4:
+                b64 += "=" * padding
+            decoded = base64.b64decode(b64).decode("utf-8")
+            if decoded.startswith("http"):
+                return decoded
+    except Exception:
+        pass
+    return url
+
+
+def _search_via_jina_reader(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """General web search via DuckDuckGo rendered through Jina Reader API.
+
+    Jina's ``r.jina.ai`` reader bypasses bot-blocking on DuckDuckGo and
+    returns clean markdown.  URLs are extracted from DDG redirect URLs.
+    Free, no API key required.
+    """
+    ddg_url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    reader_url = "https://r.jina.ai/http://" + re.sub(r"^https?://", "", ddg_url)
+
+    try:
+        session = _get_default_session()
+        resp = session.get(reader_url, timeout=timeout)
+        if resp.status_code >= 400:
+            return []
+        text = resp.text
+
+        # Locate the ``Markdown Content:`` section.
+        md_idx = text.find("Markdown Content:")
+        if md_idx == -1:
+            return []
+        content = text[md_idx + len("Markdown Content:"):].strip()
+
+        # Each search result in the markdown looks like:
+        #   ## [**Title**](url)\n\nsnippet\n\n## ...
+        # or:
+        #   N.   ## [**Title**](url)\n\nsnippet\n\nN+1.  ## ...
+        _RE_RESULT = re.compile(
+            r"^\s*(?:\d+\.\s+)?##\s+\[([^\]]+)\]\(([^)]+)\)\s*\n"
+            r"([\s\S]*?)"
+            r"(?=\n\s*(?:\d+\.\s+)?##|\Z)",
+            re.MULTILINE,
+        )
+
+        items: list[SearchResult] = []
+        for m in _RE_RESULT.finditer(content):
+            title = m.group(1).strip()
+            # Strip markdown bold markers from title
+            title = re.sub(r"\*{1,2}", "", title).strip()
+            raw_url = m.group(2).strip()
+            raw_snippet = m.group(3).strip()
+
+            # Clean markdown bold markers from snippet
+            snippet = re.sub(r"\*{1,2}", "", raw_snippet).strip()
+
+            # Extract real URL from DDG/Bing redirect
+            url = _decode_bing_url(raw_url)
+
+            items.append(SearchResult(title, url, snippet, "duckduckgo_jina"))
+            if len(items) >= max_results:
+                break
+
+        return items
+    except Exception:
+        return []
+
+
+def _search_jina_general(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """General web search via Bing through Jina Reader API."""
+    return _search_via_jina_reader(query, max_results, timeout)
+
+
+def _search_reddit_site(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search Reddit via Jina general search with site:reddit.com operator."""
+    site_query = f"site:reddit.com {query}"
+    return _search_jina_general(site_query, max_results, timeout)
+
+
+# Provider dispatch table
+_SEARCH_PROVIDERS: dict[str, list] = {
+    "duckduckgo": [_search_duckduckgo_html],
+    "hackernews": [_search_hn_algolia],
+    "arxiv": [_search_arxiv_api],
+    "wikipedia": [_search_wikipedia_api],
+    "reddit": [_search_reddit_site],
+    "bing": [_search_via_jina_reader],
+    "jina": [_search_jina_general],
+    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia],
+}
+
+
+def search_by_provider(
+    provider: str,
+    query: str,
+    *,
+    max_results: int = 5,
+    timeout: int = 20,
+) -> list[SearchResult]:
+    """Search using a specific named provider.
+
+    Supported providers: duckduckgo, hackernews, arxiv, wikipedia,
+    reddit, bing, jina, general (falls through providers).
+    Returns deduplicated SearchResult list.
+    """
+    backends = _SEARCH_PROVIDERS.get(provider, _SEARCH_PROVIDERS["general"])
+    results: list[SearchResult] = []
+    seen = set()
+    for backend_fn in backends:
+        try:
+            for item in backend_fn(query, max_results, timeout):
+                key = _canonical_url(item.url)
+                if key and key not in seen:
+                    seen.add(key)
+                    results.append(item)
+        except Exception:
+            continue
+        if len(results) >= max_results:
+            break
+    return results[:max_results]
