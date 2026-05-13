@@ -5,17 +5,40 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentweb"
 version = "0.1.7"
-description = "Web access CLI for AI agents: search, fetch, extract, and source-pack."
+description = "Zero-API-key web access CLI for AI agents: search, fetch, extract, and source-pack."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Nous Research" }]
 license = { text = "MIT" }
+keywords = ["web-scraping", "ai-agent", "search", "cli", "web-access", "no-api-key"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
-  "requests>=2.33.0,<3",
+    "requests>=2.33.0,<3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=9.0.2,<10"]
+dev = ["pytest>=9.0"]
+browser = ["camoufox", "playwright"]
+crawl = ["trafilatura>=2.0"]
+
+[project.urls]
+Homepage = "https://github.com/thanhan-a17/agentweb"
+Repository = "https://github.com/thanhan-a17/agentweb"
+Documentation = "https://github.com/thanhan-a17/agentweb#readme"
 
 [project.scripts]
 agentweb = "agentweb.cli:main"
@@ -26,8 +49,3 @@ include = ["agentweb", "agentweb.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[dependency-groups]
-dev = [
-    "pytest>=9.0.3",
-]

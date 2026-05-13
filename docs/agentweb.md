@@ -1,66 +1,76 @@
-# AgentWeb
+# AgentWeb — Usage Guide
 
-AgentWeb is a CLI web-access layer for agents. It gives Hermes one command for search, scraping, SPA extraction, logged-in cookie fetches, and evidence-pack generation instead of making the agent stitch together Python scripts every time.
+AgentWeb is a CLI for AI agents that need web access. Four commands cover everything from a quick search to multi-branch deep research — no API keys, no LLM dependency.
+
+## Installation
+
+```bash
+pip install agentweb
+# or
+uv tool install agentweb
+
+# With browser/crawl extras for JS-heavy sites:
+uv tool install 'agentweb[browser,crawl]'
+```
 
 ## Commands
 
-```bash
-agentweb search "query" --max-results 8 --format json
-agentweb fetch https://example.com --format markdown
-agentweb research "best local LLM serving stack" --max-results 6 --format json
-agentweb deep-research "transformer inference optimization" --format json
-```
-
-`AgentWeb` is also installed as an alias for `agentweb`.
-
-## What it does
-
-- Uses resilient no-key search providers: DuckDuckGo HTML + Hacker News Algolia.
-- Fetches pages with realistic browser headers and redirect handling.
-- Extracts clean text, title, metadata, and links.
-- Parses Next.js React Server Component payloads when the visible HTML is a shell.
-- Falls back to Jina Reader for cleaner article extraction or blocked/low-text pages.
-- Supports logged-in pages with `--cookies` as either a raw Cookie header or Netscape `cookies.txt` path.
-- Optionally tries `agent-browser` snapshots with `--browser` when installed.
-- Emits compact JSON/Markdown designed for LLM context, with warnings and quality scores.
-
-## Agent usage pattern
-
-Use `research` when the agent needs broad context:
+### search — Web search
 
 ```bash
-agentweb research "pricing of browser automation APIs" --max-results 8 --format json
+agentweb search "your query" --max-results 8 --timeout 20 --format json -o results.json
 ```
 
-Use `fetch` when the agent already has URLs:
+Parallel search across DuckDuckGo HTML, Jina Reader, and Hacker News Algolia. Returns deduplicated results with title, URL, snippet, and source attribution. ~3–5s.
+
+### fetch — Page text extraction
 
 ```bash
-agentweb fetch https://docs.example.com/page --format json --max-chars 20000
+agentweb fetch <url> --timeout 20 --max-chars 12000 --format json
 ```
 
-Use cookies for user-authorized logged-in pages:
+Layered extraction: direct HTTP → Jina Reader → (optional) Camoufox browser. Auto-detects bot-blocked pages and escalates tactics. Returns clean text, title, metadata, links, quality score, and warnings. ~2–15s.
+
+Cookies support for authenticated pages:
 
 ```bash
 agentweb fetch https://app.example.com/dashboard --cookies ~/.cookies/example.txt
 ```
 
-AgentWeb does not bypass authentication. It uses credentials/cookies the user explicitly provides.
-
-## Deep Research
-
-Multi-branch deep research: decomposes a query into sub-questions, parallel-fetches, ranks with BM25, and extracts evidence. No LLM required — fully algorithmic.
+### research — Question answering
 
 ```bash
-agentweb deep-research "impact of transformer architecture on LLM inference costs" --format json
-agentweb deep-research "best local LLM serving stack" --format markdown --refinement-loops 2
+agentweb research "your question" --max-results 6 --timeout 20 --format json
 ```
 
-Options: `--max-results`, `--timeout`, `--max-chars`, `--refinement-loops`, `--format` (json/markdown), `--output`.
+Search → parallel fetch top results → extract evidence snippets → generate answer pack. Returns an evidence array with source attribution. ~30–50s.
 
-The JSON output includes a decomposition plan, executive summary, findings with sources, contradictions, and metadata.
+### deep-research — Multi-branch deep research
 
-## Zero external API dependencies
+```bash
+agentweb deep-research "complex query" --max-results 8 --refinement-loops 1 --format markdown -o report.md
+```
 
-AgentWeb operates with **zero LLM API calls by default and no external API keys**. All search, fetch, research, and deep-research commands are fully self-contained — no API key required, no LLM endpoint called. The only external service used is Jina Reader (free, no key) for fallback content extraction on blocked pages.
+8-phase pipeline: query decomposition → multi-provider routing → parallel sub-agent dispatch → BM25 ranking → evidence extraction → contradiction detection → refinement loop → report generation. Zero LLM. ~40–90s.
 
-The output JSON is designed for agent-side consumption: includes the original query, search result snippets, full extracted page text, metadata, and keyword-matched evidence snippets. If an external agent wants to synthesize a summary from this data, it can do so on its own.
+Supports comparison queries, factual deep dives, and list queries. The markdown output is a complete research report with executive summary, findings, contradictions, and source list.
+
+## Output JSON structure (programmatic use)
+
+All commands support `--format json` for agent consumption. Key fields:
+
+- **search**: `results[].{title, url, snippet, source}`
+- **fetch**: `{ok, status_code, text, title, links, quality_score, tactics, warnings}`
+- **research**: `{sources[].{text, ok, quality_score, warnings}, answer_pack.evidence[].{claim_or_evidence, source, title}}`
+- **deep-research**: `{executive_summary, key_findings, evidence, contradictions, knowledge_gaps, sources}`
+
+## Best practices
+
+- Use `--format json -o output.json` to save results and avoid truncation
+- Use `research` for factual queries, `search` for quick link discovery
+- Use `deep-research` only for complex/comparison queries (it's 40–90s)
+- Use `--browser` flag on `fetch` for JS-heavy SPAs
+- The `--max-chars` flag controls text truncation (default: 12000 for fetch, 6000 for research)
+- Quality score is 0–10: >5 is reasonable content, >7 is good
+
+For full details, see the [README](https://github.com/thanhan-a17/agentweb#readme).

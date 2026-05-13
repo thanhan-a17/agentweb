@@ -88,9 +88,6 @@ _RE_STOP_WORDS = re.compile(
 )
 _RE_WHITESPACE = re.compile(r"\s+")
 
-
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # SEMANTIC ROUTER — classify queries into provider categories
 # ═══════════════════════════════════════════════════════════════════════════
@@ -455,7 +452,6 @@ PROVIDER_TAGS: dict[str, list[str]] = {
     "hackernews": ["technology", "startups", "product", "discussion", "general"],
     "wikipedia": ["factual", "background", "history", "definition", "overview"],
     "arxiv": ["research", "academic", "technical", "paper", "science", "algorithm"],
-    "arxiv_": ["research", "academic", "technical", "paper", "science", "algorithm"],
     "reddit": ["discussion", "opinion", "experience", "review", "comparison"],
     "google": ["general", "news", "products", "factual"],
 }
