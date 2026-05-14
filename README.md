@@ -5,15 +5,15 @@
 ## Installation
 
 ```bash
-pip install agentweb
+pip install git+https://github.com/thanhan-a17/agentweb.git
 ```
 
 ```bash
 # or with uv
-uv tool install agentweb
+uv tool install git+https://github.com/thanhan-a17/agentweb.git
 
 # with browser/crawl extras for JS-heavy sites with anti-detection
-uv tool install 'agentweb[browser,crawl]'
+uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'
 ```
 
 ```bash
@@ -21,6 +21,11 @@ uv tool install 'agentweb[browser,crawl]'
 git clone https://github.com/thanhan-a17/agentweb
 cd agentweb
 uv tool install '.[browser,crawl]'
+```
+
+To upgrade:
+```bash
+pip install --upgrade git+https://github.com/thanhan-a17/agentweb.git
 ```
 
 ## Quick Start

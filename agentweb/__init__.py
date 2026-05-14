@@ -13,7 +13,7 @@ __all__ = [
     "format_markdown_fetch",
     "format_markdown_research",
 ]
-__version__ = "0.1.7"
+__version__ = "0.2.0"
 
 from agentweb.authenticity import ContentAuthenticity
 from .core import (
