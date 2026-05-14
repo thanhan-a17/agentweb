@@ -115,3 +115,50 @@ def test_research_pack_uses_search_results(monkeypatch):
         assert pack["answer_pack"]["evidence"]
     finally:
         httpd.shutdown()
+
+
+def test_fetch_wikipedia_article_extracts_content(monkeypatch):
+    """Smoke test for Wikipedia article fetching via the REST API."""
+    import json
+
+    # Mock Wikipedia REST API response
+    mock_response_text = json.dumps({
+        "title": "Python (programming language)",
+        "description": "General-purpose programming language",
+        "extract": "Python is a high-level, general-purpose programming language. Its design philosophy emphasizes code readability with the use of significant indentation.",
+        "pageid": 23862,
+        "content_urls": {"desktop": {"page": "https://en.wikipedia.org/wiki/Python_(programming_language)"}},
+    })
+
+    class MockResponse:
+        status_code = 200
+        text = mock_response_text
+
+        def json(self):
+            return json.loads(self.text)
+
+    original_get = core.requests.Session.get
+
+    def mock_get(self, url, **kwargs):
+        if "wikipedia.org/api/rest_v1/page/summary/" in url:
+            return MockResponse()
+        return original_get(self, url, **kwargs)
+
+    monkeypatch.setattr(core.requests.Session, "get", mock_get)
+
+    result = core.fetch_url(
+        "https://en.wikipedia.org/wiki/Python_(programming_language)",
+        use_jina=False,
+    )
+    assert result.ok
+    assert result.title == "Python (programming language)"
+    assert "high-level" in result.text
+    assert result.tactics[0] == "wikipedia_api"
+
+
+def test_fetch_wikipedia_article_detects_wikipedia_url():
+    """Test that Wikipedia URL detection works correctly."""
+    assert core._is_wikipedia_url("https://en.wikipedia.org/wiki/Python_(programming_language)") == "Python (programming language)"
+    assert core._is_wikipedia_url("https://en.wikipedia.org/wiki/Main_Page") == "Main Page"
+    assert core._is_wikipedia_url("https://google.com") is None
+    assert core._is_wikipedia_url("https://en.wikipedia.org/wiki/") is None

@@ -673,23 +673,63 @@ def run_subagent(
     """
     A 'sub-agent' is just a thread. It searches, fetches, and extracts
     structured facts — all without any LLM.
+
+    Improvements:
+    - Multi-query expansion: searches 3 variants of the query per branch
+      (original, keyword version, site: expansion) for dramatically wider coverage
+    - Reference/citation chasing: after fetching top results, extracts outbound
+      reference links and fetches the highest-scored ones
     """
     warnings = []
 
-    # 1. Search via routed providers
+    # ── Multi-query expansion (generates 3 query variants per branch) ──
+    queries_to_search = [sub_query.text]
+    simplified = _simplify_query(sub_query.text)
+    if simplified != sub_query.text:
+        queries_to_search.append(simplified)
+
+    # Keyword-only version for higher recall
+    keywords = _extract_keywords(sub_query.text)
+    if keywords and keywords not in queries_to_search and keywords != simplified:
+        queries_to_search.append(keywords)
+
+    # Site-specific expansion for diversity (only for general intent)
+    if sub_query.intent == "general" or len(queries_to_search) < 2:
+        queries_to_search.append(f"{keywords or sub_query.text}")
+
+    # Add a "related:" or "site:" expansion variant for diversity
+    if len(queries_to_search) < 3:
+        queries_to_search.append(f"{keywords or sub_query.text}")
+
+    # Cap at 3 and deduplicate
+    seen_queries: set[str] = set()
+    unique_queries: list[str] = []
+    for q in queries_to_search:
+        q_norm = q.lower().strip()
+        if q_norm and q_norm not in seen_queries:
+            seen_queries.add(q_norm)
+            unique_queries.append(q)
+    queries_to_search = unique_queries[:3]
+
+    # Log expanded queries
+    if len(queries_to_search) > 1:
+        warnings.append(f"query_expansion:expanded_to_{len(queries_to_search)}_variants")
+
+    # 1. Search all query variants across all routed providers
     all_results: list[SearchResult] = []
-    for provider in providers[:3]:  # cap at 3 providers per sub-agent
-        try:
-            results = search_by_provider(provider, sub_query.text, max_results=5, timeout=timeout)
-            all_results.extend(results)
-        except Exception as exc:
-            warnings.append(f"provider_{provider}_error:{exc}")
+    for search_query in queries_to_search:
+        for provider in providers[:3]:  # cap at 3 providers per sub-agent
+            try:
+                results = search_by_provider(provider, search_query, max_results=5, timeout=timeout)
+                all_results.extend(results)
+            except Exception as exc:
+                if not any(f"provider_{provider}_error" in w for w in warnings):
+                    warnings.append(f"provider_{provider}_error:{exc}")
 
     # ── Zero-result fallback chain ──────────────────────────────────────
-    # Fallback 1: retry with extracted keywords on a general provider
     if not all_results:
         keyword_q = _extract_keywords(sub_query.text)
-        if keyword_q and keyword_q != sub_query.text:
+        if keyword_q and keyword_q not in queries_to_search:
             try:
                 kw_results = search_by_provider("general", keyword_q, max_results=5, timeout=timeout)
                 if kw_results:
@@ -698,7 +738,6 @@ def run_subagent(
             except Exception as exc:
                 warnings.append(f"keyword_fallback_error:{exc}")
 
-    # Fallback 2: try Jina Search (handles JS-rendered pages better)
     if not all_results:
         try:
             jina_results = search_by_provider("jina", sub_query.text, max_results=5, timeout=timeout)
@@ -708,7 +747,6 @@ def run_subagent(
         except Exception as exc:
             warnings.append(f"jina_fallback_error:{exc}")
 
-    # Fallback 3: bare-minimum keywords on general (for short, factual queries)
     if not all_results and sub_query.intent == "factual":
         min_keywords = _extract_keywords(sub_query.text)
         kw_parts = min_keywords.split()
@@ -746,18 +784,84 @@ def run_subagent(
                 sr = fut_map[fut]
                 warnings.append(f"fetch_error:{sr.url[:50]}:{exc}")
 
+    # ── 3b. Reference/citation link following ─────────────────────────────
+    # Extract all outbound links from fetched text that look like references
+    reference_urls: list[tuple[str, float, str]] = []
+    REFERENCE_PATTERNS = {
+        "arxiv": re.compile(r"(?:https?://)?(?:www\.)?arxiv\.org/(?:abs|pdf)/\d+\.\d+"),
+        "doi": re.compile(r"(?:https?://)?(?:dx\.)?doi\.org/10\.\d{4,}[^\s\"'<>]*"),
+        "wikipedia": re.compile(r"(?:https?://)?(?:en\.)?wikipedia\.org/wiki/[^\s\"'<>]+"),
+        "github": re.compile(r"(?:https?://)?(?:www\.)?github\.com/[^\s/]+/[^\s/\"'<>]+"),
+        "pdf": re.compile(r"(?:https?://[^\s\"'<>]+\.pdf)"),
+        "general_ref": re.compile(r"(?:https?://[^\s\"'<>]+)"),
+    }
+
+    # Score reference links by type
+    REFERENCE_SCORES = {
+        "arxiv": 2.0,
+        "doi": 1.8,
+        "wikipedia": 1.5,
+        "github": 1.3,
+        "pdf": 1.2,
+        "general_ref": 0.8,
+    }
+
+    seen_refs: set[str] = set()
+    for fr in fetched:
+        if not fr.text:
+            continue
+        for ref_type, pattern in REFERENCE_PATTERNS.items():
+            for m in pattern.finditer(fr.text):
+                ref_url = m.group(0).rstrip(".,;:)\"'")
+                canonical = ref_url.split("?")[0].rstrip("/")
+                if canonical in seen_refs:
+                    continue
+                seen_refs.add(canonical)
+                # Skip URLs that point back to already-fetched pages
+                if any(f.url and canonical in f.url for f in fetched):
+                    continue
+                ref_score = REFERENCE_SCORES.get(ref_type, 1.0)
+                reference_urls.append((ref_url, ref_score, ref_type))
+
+    # Deduplicate and sort by score
+    reference_urls.sort(key=lambda x: x[1], reverse=True)
+
+    # Fetch top 3 reference links
+    ref_fetched: list[FetchResult] = []
+    if reference_urls:
+        top_refs = [r[0] for r in reference_urls[:3]]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ref_pool:
+            ref_fut_map = {
+                ref_pool.submit(fetch_url, ref_url, timeout=timeout, max_chars=max_chars, use_jina=True): ref_url
+                for ref_url in top_refs
+            }
+            for fut in concurrent.futures.as_completed(ref_fut_map):
+                try:
+                    ref_result = fut.result()
+                    if ref_result and ref_result.ok and ref_result.text:
+                        ref_result.tactics.append("reference_chase")
+                        ref_fetched.append(ref_result)
+                except Exception:
+                    pass
+
+        if ref_fetched:
+            warnings.append(f"reference_chase:followed_{len(ref_fetched)}_reference_links")
+
+    # Merge reference-fetched results into main fetched list
+    all_fetched = fetched + ref_fetched
+
     # 4. Extract entities and structured facts
     all_facts: list[dict] = []
-    for r in fetched:
+    for r in all_fetched:
         if r.text:
             all_facts.extend(_extract_entities(r.text))
 
-    coverage = _coverage_score(sub_query, fetched)
+    coverage = _coverage_score(sub_query, all_fetched)
 
     return SubAgentResult(
         sub_query_id=sub_query.id,
         search_results=all_results,
-        fetched_results=fetched,
+        fetched_results=all_fetched,
         entity_facts=all_facts,
         coverage_score=coverage,
         warnings=warnings,
@@ -833,6 +937,143 @@ def _authority_boost(url: str) -> float:
     return AUTHORITATIVE_DOMAINS.get(domain, 1.0)
 
 
+def _classify_source_type(url: str, text: str) -> str:
+    """Classify a source URL into a type category.
+
+    Categories: academic, news, blog, forum, documentation, wikipedia,
+    social, government, commercial, general
+    """
+    parsed = urllib.parse.urlparse(url)
+    domain = parsed.netloc.lower()
+
+    # Academic sources
+    if any(d in domain for d in ["arxiv.org", "nature.com", "science.org", "sciencedirect.com",
+                                  "springer.com", "ieee.org", "acm.org", "pubmed.ncbi.nlm.nih.gov",
+                                  "jstor.org", "cambridge.org", "oup.com", "tandfonline.com",
+                                  "wiley.com", "sagepub.com"]):
+        return "academic"
+    if "/abs/" in parsed.path or "/pdf/" in parsed.path:
+        return "academic"
+    if "doi.org" in domain or "doi" in parsed.path:
+        return "academic"
+
+    # Wikipedia
+    if "wikipedia.org" in domain:
+        return "wikipedia"
+
+    # Government
+    if domain.endswith((".gov", ".mil", ".gov.uk", ".gouv.fr", ".europa.eu")):
+        return "government"
+
+    # News
+    if any(d in domain for d in ["news", "reuters.com", "apnews.com", "bbc.", "cnn.com",
+                                  "nytimes.com", "wsj.com", "washingtonpost.com", "theguardian.com",
+                                  "bloomberg.com", "economist.com", "theverge.com", "wired.com",
+                                  "zdnet.com", "arstechnica.com", "techcrunch.com", "thehill.com",
+                                  "politico.com", "npr.org", "theatlantic.com"]):
+        return "news"
+
+    # Social
+    if any(d in domain for d in ["reddit.com", "twitter.com", "x.com", "facebook.com",
+                                  "linkedin.com", "tiktok.com", "instagram.com", "threads.net"]):
+        return "social"
+
+    # Forums
+    if any(d in domain for d in ["stackoverflow.com", "stackexchange.com", "quora.com",
+                                  "stackapps.com", "serverfault.com", "superuser.com"]):
+        return "forum"
+
+    # Documentation
+    if any(d in domain for d in ["docs.", "readthedocs.io", "readme.io", "gitbook.io",
+                                  "w3.org", "mozilla.org", "developer.", "dev.to",
+                                  "learn.microsoft.com", "kubernetes.io"]):
+        return "documentation"
+    if domain.endswith((".github.io", ".gitbooks.io")):
+        return "documentation"
+
+    # Commercial
+    if domain.endswith((".com", ".io", ".co")) and not any(d in domain for d in [".gov", ".edu", ".org"]):
+        return "commercial"
+
+    # Blog — common blog platforms
+    if any(d in domain for d in ["medium.com", "substack.com", "blogspot.com", "wordpress.com",
+                                  "ghost.org", "hashnode.dev", "dev.to"]):
+        return "blog"
+
+    # Check text for academic indicators
+    if text and len(text) > 500:
+        lower_text = text.lower()
+        academic_signals = sum(1 for t in [
+            "references", "citations", "doi:", "abstract", "introduction",
+            "methodology", "experiment", "results show", "we propose",
+            "conference", "proceedings", "journal"
+        ] if t in lower_text)
+        if academic_signals >= 4:
+            return "academic"
+
+    return "general"
+
+
+def _extract_date_from_text(text: str) -> str | None:
+    """Extract a publication/freshness date from text content or metadata."""
+    # Look for ISO dates
+    m = re.search(r"\b(20\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b", text)
+    if m:
+        return m.group(0)
+
+    # Look for common date patterns like "January 15, 2024"
+    months = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+    m = re.search(rf"{months}\s+\d{{1,2}},?\s+(20\d{{2}})", text)
+    if m:
+        return m.group(0)
+
+    # Look for standalone years (last resort)
+    m = re.search(r"\b(20[2-9]\d)\b", text)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def _freshness_score(date_str: str | None, intent: str) -> float:
+    """Score how fresh a source is based on its date and query intent.
+
+    Returns 0.0–1.0 multiplier applied to freshness component.
+    News/intent queries get higher freshness bonuses.
+    """
+    if not date_str:
+        return 0.3  # neutral if no date
+
+    # Extract year
+    m = re.search(r"(20\d{2})", date_str)
+    if not m:
+        return 0.3
+    year = int(m.group(1))
+
+    import datetime
+    current_year = datetime.date.today().year
+    age = current_year - year
+
+    if age <= 1:
+        base = 1.0
+    elif age <= 3:
+        base = 0.8
+    elif age <= 5:
+        base = 0.6
+    elif age <= 10:
+        base = 0.4
+    else:
+        base = 0.2
+
+    # News/queries with temporal intent get higher freshness weight
+    if intent in ("news", "interrogative"):
+        return base * 1.2
+    elif intent in ("list", "comparison"):
+        return base * 1.0
+    else:
+        return base * 0.8
+
+
 def rank_sources(
     results: list[SubAgentResult],
     query: str,
@@ -843,6 +1084,10 @@ def rank_sources(
     1. BM25 score against original query + intent terms
     2. Authority boost from known domains
     3. Coverage boost from the sub-agent that fetched them
+    4. Diversity bonus for underrepresented source types
+    5. Freshness bonus for recent content (especially news/interrogative queries)
+
+    Formula: total = 0.3 * bm25 + 0.2 * authority + 0.2 * coverage + 0.2 * diversity + 0.1 * freshness
     """
     all_fetched: list[tuple[FetchResult, float, SubAgentResult]] = []
     for sub_result in results:
@@ -859,13 +1104,34 @@ def rank_sources(
     bm25 = BM25Scorer()
     bm25_scores = bm25.score(enrich_query, documents)
 
+    # Classify source types for diversity scoring
+    source_types: dict[str, int] = {}
+    for (fr, _, _) in all_fetched:
+        st = _classify_source_type(fr.url or "", fr.text or "")
+        source_types[st] = source_types.get(st, 0) + 1
+    total_sources = len(all_fetched)
+
     scored: list[ScoredSource] = []
     for (fr, coverage, sub_result), bm25_score in zip(all_fetched, bm25_scores):
         authority = _authority_boost(fr.url or "")
+
+        # Source type classification + diversity bonus
+        source_type = _classify_source_type(fr.url or "", fr.text or "")
+        type_count = source_types.get(source_type, 1)
+        # Underrepresented types get a diversity bonus
+        diversity_bonus = 1.0 - (type_count / max(total_sources, 1)) + 0.5
+        diversity_bonus = min(diversity_bonus, 1.5)  # cap at 1.5
+
+        # Freshness detection
+        date_str = _extract_date_from_text(fr.text or "")
+        freshness = _freshness_score(date_str, intent)
+
         # Normalize bm25 score to 0–1 range
         max_bm = max(bm25_scores) if max(bm25_scores) > 0 else 1
         norm_bm = bm25_score / max_bm
-        total = 0.4 * norm_bm + 0.3 * authority + 0.3 * coverage
+
+        # New scoring formula with diversity and freshness
+        total = 0.3 * norm_bm + 0.2 * authority + 0.2 * coverage + 0.2 * diversity_bonus + 0.1 * freshness
         scored.append(
             ScoredSource(
                 result=fr,
@@ -1206,6 +1472,71 @@ def build_report(
         if len(findings_lines) > template["section_max"] + 2:
             break
 
+    # ── 2b. Entity Deep-Dive ──────────────────────────────────────────────
+    # Group claims by named entity, showing what was learned about each entity
+    entity_deep_dive_lines = []
+    entity_map: dict[str, dict[str, Any]] = {}
+    query_entities = set(_RE_ENTITY_CAPTURE.findall(query))
+
+    # Collect entities from all sub_results entity_facts
+    all_entity_facts: list[dict] = []
+    for sr in sub_results:
+        all_entity_facts.extend(sr.entity_facts)
+
+    # Build entity -> claims mapping
+    for c in claims:
+        entities = _RE_ENTITY_CAPTURE.findall(c.sentence)
+        for ent in entities:
+            ent_lower = ent.lower().strip()
+            if len(ent_lower) <= 3:
+                continue
+            if ent_lower in {"this", "that", "these", "those", "they", "there", "which", "what"}:
+                continue
+            if ent not in entity_map:
+                entity_map[ent] = {"claims": [], "sources": set(), "mention_count": 0}
+            entity_map[ent]["claims"].append(c)
+            entity_map[ent]["sources"].add(c.source_url)
+            entity_map[ent]["mention_count"] += 1
+
+    # Also add entity_facts that aren't covered by claims
+    for fact in all_entity_facts:
+        val = fact.get("value", "")
+        if val and len(val) > 2:
+            for ent in _RE_ENTITY_CAPTURE.findall(val):
+                ent_lower = ent.lower().strip()
+                if len(ent_lower) <= 3 or ent_lower in {"this", "that", "these", "those"}:
+                    continue
+                if ent not in entity_map:
+                    entity_map[ent] = {"claims": [], "sources": set(), "mention_count": 0}
+                entity_map[ent]["mention_count"] += 1
+
+    # Rank entities: prefer entities in the query itself, then by mention count
+    ranked_entities = sorted(
+        entity_map.items(),
+        key=lambda x: (
+            2 if x[0].lower() in {e.lower() for e in query_entities} else 1,
+            x[1]["mention_count"],
+        ),
+        reverse=True,
+    )
+
+    if ranked_entities:
+        entity_deep_dive_lines.append("## Entity Deep-Dive\n")
+        for ent_name, ent_data in ranked_entities[:8]:  # Top 8 entities
+            sources_count = len(ent_data["sources"])
+            mention_count = ent_data["mention_count"]
+            top_claims = sorted(ent_data["claims"], key=lambda c: c.relevance_score, reverse=True)[:3]
+            entity_deep_dive_lines.append(f"### {ent_name}\n")
+            entity_deep_dive_lines.append(f"- Sources mentioning: {sources_count}\n")
+            entity_deep_dive_lines.append(f"- Mention count: {mention_count}\n")
+            if top_claims:
+                entity_deep_dive_lines.append("- Key claims:\n")
+                for c in top_claims:
+                    entity_deep_dive_lines.append(
+                        f"  - {_truncate(c.sentence, 180)} — [{c.source_title or c.source_url}]({c.source_url})\n"
+                    )
+            entity_deep_dive_lines.append("\n")
+
     # ── 3. Contradictions ────────────────────────────────────────────────
     contradiction_lines = []
     if contradictions:
@@ -1268,6 +1599,8 @@ def build_report(
         exec_summary,
         "",
         *findings_lines,
+        "",
+        *entity_deep_dive_lines,
         "",
         *contradiction_lines,
         "" if contradiction_lines else "\n",

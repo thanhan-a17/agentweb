@@ -303,6 +303,297 @@ def _looks_blocked(text: str, status_code: int | None) -> bool:
     return bool(BLOCK_PATTERNS.search(text[:5000]))
 
 
+def _is_wikipedia_url(url: str) -> str | None:
+    """Detect Wikipedia article URLs and extract the page title.
+
+    Returns the page title if the URL is a Wikipedia article, or None.
+    """
+    parsed = urllib.parse.urlparse(url)
+    domain = parsed.netloc.lower()
+    if not (domain.endswith("wikipedia.org") or domain.endswith("wikipedia.com")):
+        return None
+    # Parse path like /wiki/Page_Title or /en.wikipedia.org/wiki/Page_Title
+    path = parsed.path.rstrip("/")
+    # Support both /wiki/Title and language-prefixed /en/wiki/Title forms
+    m = re.search(r"/wiki/([^/?#]+)", path)
+    if m:
+        return urllib.parse.unquote(m.group(1)).replace("_", " ")
+    return None
+
+
+def _fetch_wikipedia_article(url: str, timeout: int) -> FetchResult | None:
+    """Fetch a Wikipedia article using the REST API v1.
+
+    Returns a FetchResult with full article text as markdown-style content,
+    or None if the URL is not a Wikipedia article or the API call fails.
+    """
+    title = _is_wikipedia_url(url)
+    if not title:
+        return None
+
+    start = time.monotonic()
+    try:
+        # Try the summary endpoint first (faster, cleaner)
+        summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(title.replace(' ', '_'))}"
+        session = _get_default_session()
+        resp = session.get(summary_url, timeout=timeout)
+        if resp.status_code >= 400:
+            return None
+        data = resp.json()
+
+        extract = data.get("extract", "")
+        if not extract:
+            return None
+
+        description = data.get("description", "")
+        title_text = data.get("title", title)
+        page_url = data.get("content_urls", {}).get("desktop", {}).get("page", url)
+        # Build markdown-style content
+        parts = [f"# {title_text}"]
+        if description:
+            parts.append(f"\n*{description}*\n")
+        parts.append("")
+        parts.append(extract)
+        text = "\n".join(parts)
+
+        elapsed = int((time.monotonic() - start) * 1000)
+        return FetchResult(
+            url=url,
+            final_url=page_url,
+            ok=True,
+            status_code=resp.status_code,
+            source="wikipedia_api",
+            title=title_text,
+            text=text,
+            metadata={"source": "wikipedia", "description": description, "page_id": str(data.get("pageid", ""))},
+            tactics=["wikipedia_api"],
+            elapsed_ms=elapsed,
+        )
+    except Exception:
+        return None
+
+
+def _is_youtube_url(url: str) -> bool:
+    """Detect if a URL is a YouTube video."""
+    parsed = urllib.parse.urlparse(url)
+    domain = parsed.netloc.lower()
+    if "youtube.com" in domain or "youtu.be" in domain:
+        # Must have a video ID in path or query
+        if "youtu.be" in domain:
+            return bool(parsed.path.strip("/"))
+        # youtube.com/watch?v=VIDEO_ID
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "v" in qs:
+            return bool(qs["v"][0])
+        # youtube.com/embed/VIDEO_ID or /shorts/VIDEO_ID
+        if parsed.path.startswith(("/embed/", "/shorts/", "/v/")):
+            return True
+    return False
+
+
+def _fetch_youtube_transcript(url: str, timeout: int) -> FetchResult | None:
+    """Fetch a YouTube video transcript using yt-dlp or youtube_transcript_api.
+
+    Returns structured text with timestamps, or None if unavailable.
+    No API keys required — yt-dlp is free and youtube_transcript_api uses
+    YouTube's public transcript endpoints.
+    """
+    if not _is_youtube_url(url):
+        return None
+
+    start = time.monotonic()
+    title = ""
+    description = ""
+    transcript_text = ""
+
+    # Strategy 1: Use yt-dlp if available (handles most cases)
+    yt_dlp_exe = shutil.which("yt-dlp")
+    if yt_dlp_exe:
+        try:
+            # Get title and description
+            info_result = subprocess.run(
+                [yt_dlp_exe, "--skip-download", "--print", "title", "--print", "description", url],
+                capture_output=True, text=True, timeout=timeout, check=False,
+            )
+            if info_result.returncode == 0:
+                lines = info_result.stdout.strip().split("\n", 1)
+                title = lines[0].strip() if lines else ""
+                description = lines[1].strip() if len(lines) > 1 else ""
+
+            # Try to get auto-subs transcript
+            subprocess.run(
+                [
+                    yt_dlp_exe, "--skip-download",
+                    "--write-auto-subs", "--sub-lang", "en",
+                    "--convert-subs", "srt",
+                    "--output", "/tmp/yt_transcript_%(id)s",
+                    url,
+                ],
+                capture_output=True, text=True, timeout=timeout, check=False,
+            )
+            # Find the generated SRT file
+            import glob
+            srt_files = glob.glob("/tmp/yt_transcript_*.en.srt") or glob.glob("/tmp/yt_transcript_*.srt")
+            if srt_files:
+                srt_text = Path(srt_files[0]).read_text(encoding="utf-8", errors="replace")
+                # Parse SRT: extract text lines (skip timestamps and sequence numbers)
+                srt_lines = []
+                for line in srt_text.splitlines():
+                    line = line.strip()
+                    if not line or "-->" in line or line.isdigit():
+                        continue
+                    srt_lines.append(line)
+                transcript_text = "\n".join(srt_lines)
+                # Clean up temp file
+                try:
+                    Path(srt_files[0]).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Strategy 2: Try youtube_transcript_api Python package
+    if not transcript_text:
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore[import-untyped]
+
+            # Extract video ID from URL
+            parsed = urllib.parse.urlparse(url)
+            video_id = ""
+            if "youtu.be" in parsed.netloc:
+                video_id = parsed.path.strip("/").split("?")[0]
+            else:
+                qs = urllib.parse.parse_qs(parsed.query)
+                video_id = qs.get("v", [""])[0]
+            if video_id:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+                parts = []
+                for entry in transcript_list:
+                    seconds = int(entry["start"])
+                    minutes = seconds // 60
+                    secs = seconds % 60
+                    timestamp = f"[{minutes:02d}:{secs:02d}]"
+                    parts.append(f"{timestamp} {entry['text']}")
+                transcript_text = "\n".join(parts)
+        except ImportError:
+            pass  # Package not available
+        except Exception:
+            pass
+
+    if not transcript_text and not title:
+        return None
+
+    elapsed = int((time.monotonic() - start) * 1000)
+
+    # Build structured text
+    parts = []
+    if title:
+        parts.append(f"# {title}")
+    if description:
+        parts.append(f"\n{description}\n")
+    if transcript_text:
+        parts.append("## Transcript\n")
+        parts.append(transcript_text)
+    else:
+        if title:
+            parts.append("\n*Title and description available, no transcript found.*")
+
+    text = "\n".join(parts)
+    return FetchResult(
+        url=url,
+        final_url=url,
+        ok=True,
+        status_code=200,
+        source="youtube_transcript",
+        title=title or "YouTube Video",
+        text=text,
+        metadata={"source": "youtube", "description": description[:200] if description else ""},
+        tactics=["youtube_transcript"],
+        elapsed_ms=elapsed,
+    )
+
+
+def _fetch_arxiv_pdf_text(url: str, timeout: int) -> FetchResult | None:
+    """Fetch an arXiv paper's abstract directly from its abstract page.
+
+    Much better than trying to parse the PDF. Handles both abstract URLs
+    (arxiv.org/abs/XXXX) and PDF URLs (arxiv.org/pdf/XXXX).
+    """
+    # Normalize to abstract URL
+    abs_url = re.sub(r"/pdf/(\d+\.\d+)", r"/abs/\1", url)
+    abs_url = re.sub(r"/pdf/(\d+\.\d+)\.pdf", r"/abs/\1", abs_url)
+
+    if "/abs/" not in abs_url:
+        return None
+
+    start = time.monotonic()
+    try:
+        session = _get_default_session()
+        resp = session.get(abs_url, timeout=timeout, headers={"User-Agent": USER_AGENTS[0]})
+        if resp.status_code >= 400:
+            return None
+        raw = resp.text
+
+        # Extract title
+        title = ""
+        m = re.search(r'<meta\s+name="citation_title"\s+content="([^"]+)"', raw)
+        if m:
+            title = html.unescape(m.group(1))
+
+        # Extract authors
+        authors = []
+        for m in re.finditer(r'<meta\s+name="citation_author"\s+content="([^"]+)"', raw):
+            authors.append(html.unescape(m.group(1)))
+
+        # Extract abstract
+        abstract = ""
+        m = re.search(r'<blockquote\s+class="abstract[^"]*"[^>]*>\s*(.*?)\s*</blockquote>', raw, re.DOTALL)
+        if m:
+            abstract = _strip_html(m.group(1))
+        else:
+            m = re.search(r'<meta\s+name="citation_abstract"\s+content="([^"]+)"', raw)
+            if m:
+                abstract = html.unescape(m.group(1))
+
+        # Extract subjects/categories
+        subjects = []
+        for m in re.finditer(r'<span\s+class="primary-subject"[^>]*>(.*?)</span>', raw):
+            subjects.append(_strip_html(m.group(1)))
+
+        if not abstract and not title:
+            return None
+
+        # Build structured markdown
+        parts = [f"# {title or 'arXiv Paper'}", ""]
+        if authors:
+            parts.append(f"**Authors:** {', '.join(authors)}")
+        if subjects:
+            parts.append(f"**Subjects:** {', '.join(subjects)}")
+        parts.append(f"**URL:** {abs_url}")
+        parts.append("")
+        if abstract:
+            parts.append("## Abstract")
+            parts.append(abstract)
+
+        text = "\n".join(parts)
+        elapsed = int((time.monotonic() - start) * 1000)
+
+        return FetchResult(
+            url=url,
+            final_url=abs_url,
+            ok=True,
+            status_code=resp.status_code,
+            source="arxiv_abstract",
+            title=title or "arXiv Paper",
+            text=text,
+            metadata={"authors": ", ".join(authors), "subjects": ", ".join(subjects)} if authors else {},
+            tactics=["arxiv_abstract"],
+            elapsed_ms=elapsed,
+        )
+    except Exception:
+        return None
+
+
 def fetch_url(
     url: str,
     *,
@@ -319,6 +610,29 @@ def fetch_url(
     tactics: list[str] = []
     warnings: list[str] = []
 
+    # ── Specialized extractors (run first, they produce better content) ──
+    # Wikipedia full article via REST API
+    if _is_wikipedia_url(url):
+        wiki_result = _fetch_wikipedia_article(url, timeout)
+        if wiki_result and wiki_result.ok and wiki_result.text:
+            wiki_result.elapsed_ms = max(wiki_result.elapsed_ms, int((time.monotonic() - start) * 1000))
+            return wiki_result
+
+    # YouTube transcript extraction
+    if _is_youtube_url(url):
+        yt_result = _fetch_youtube_transcript(url, timeout)
+        if yt_result and yt_result.ok and yt_result.text:
+            yt_result.elapsed_ms = max(yt_result.elapsed_ms, int((time.monotonic() - start) * 1000))
+            return yt_result
+
+    # arXiv abstract extraction (better than PDF parsing)
+    if "/abs/" in url or "/pdf/" in url and "arxiv.org" in url.lower():
+        arxiv_result = _fetch_arxiv_pdf_text(url, timeout)
+        if arxiv_result and arxiv_result.ok and arxiv_result.text:
+            arxiv_result.elapsed_ms = max(arxiv_result.elapsed_ms, int((time.monotonic() - start) * 1000))
+            return arxiv_result
+
+    # ── Generic HTTP fetch ──
     s = _session(timeout=timeout, cookies=cookies, headers=headers)
     raw = ""
     response: requests.Response | None = None
@@ -1155,6 +1469,54 @@ def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[S
     return interleaved
 
 
+def _search_stackexchange_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search StackOverflow and StackExchange sites via their public API.
+
+    No API key needed for basic usage. Free but throttled (~300 req/day per IP).
+    Returns results with: title, link, tags, score, answer_count.
+    Searches stackoverflow.com by default; also tries stackexchange.com for broader coverage.
+    """
+    results: list[SearchResult] = []
+    sites = ["stackoverflow", "stackexchange"]
+
+    for site in sites:
+        if len(results) >= max_results:
+            break
+        url = "https://api.stackexchange.com/2.3/search/advanced?" + urllib.parse.urlencode(
+            {
+                "order": "desc",
+                "sort": "relevance",
+                "q": query,
+                "site": site,
+                "pagesize": min(max_results, 10),
+            }
+        )
+        try:
+            resp = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENTS[0]})
+            if resp.status_code >= 400:
+                continue
+            data = resp.json()
+            for item in data.get("items", []):
+                title = html.unescape(item.get("title", ""))
+                link = item.get("link", "")
+                tags = item.get("tags", [])
+                score = item.get("score", 0)
+                answer_count = item.get("answer_count", 0)
+                is_answered = item.get("is_answered", False)
+                snippet = f"Score: {score} | Answers: {answer_count}"
+                if tags:
+                    snippet += f" | Tags: {', '.join(tags[:4])}"
+                if is_answered:
+                    snippet += " | ✓ Accepted"
+                if title and link:
+                    results.append(SearchResult(title, link, snippet, "stackexchange"))
+                if len(results) >= max_results:
+                    break
+        except Exception:
+            continue
+    return results[:max_results]
+
+
 _SEARCH_PROVIDERS: dict[str, list] = {
     "duckduckgo": [_search_duckduckgo_html],
     "hackernews": [_search_hn_algolia],
@@ -1167,9 +1529,9 @@ _SEARCH_PROVIDERS: dict[str, list] = {
     "xcom": [_search_twitter_site],
     "bing": [_search_via_jina_reader],
     "jina": [_search_jina_general],
-    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia, _search_reddit_api],
+    "stackexchange": [_search_stackexchange_api],
+    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia, _search_reddit_api, _search_stackexchange_api],
 }
-
 
 def search_by_provider(
     provider: str,
