@@ -8,14 +8,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .core import (
-    fetch_url,
-    format_markdown_fetch,
-    format_markdown_research,
-    research,
-    search_web,
-)
-from .deep_research import deep_research
+from .core import FetchResult, format_markdown_fetch, format_markdown_research
+from .sdk import AgentWeb
 
 
 def _headers(values: list[str] | None) -> dict[str, str]:
@@ -87,9 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    aw = AgentWeb()
     try:
         if args.command == "search":
-            results = [r.to_dict() for r in search_web(args.query, max_results=args.max_results, timeout=args.timeout)]
+            result = aw.search(args.query, max_results=args.max_results, timeout=args.timeout)
+            results = result["results"]
             if args.format == "markdown":
                 lines = [f"# AgentWeb search: {args.query}", ""]
                 for i, item in enumerate(results, 1):
@@ -99,11 +95,11 @@ def main(argv: list[str] | None = None) -> int:
                     lines.append(f"   Source: {item['source']}")
                 _emit("\n".join(lines) + "\n", "text", args.output)
             else:
-                _emit({"query": args.query, "results": results}, "json", args.output)
+                _emit({"query": args.query, "results": results, "meta": result.get("meta")}, "json", args.output)
             return 0
 
         if args.command == "fetch":
-            result = fetch_url(
+            result = aw.fetch(
                 args.url,
                 timeout=args.timeout,
                 max_chars=args.max_chars,
@@ -113,13 +109,29 @@ def main(argv: list[str] | None = None) -> int:
                 use_browser=args.browser,
             )
             if args.format == "markdown":
-                _emit(format_markdown_fetch(result, max_chars=args.max_chars), "text", args.output)
+                # Reconstruct FetchResult from dict for markdown formatter
+                fr = FetchResult(
+                    url=result.get("url", args.url),
+                    final_url=result.get("final_url", ""),
+                    ok=result.get("ok", False),
+                    status_code=result.get("status_code"),
+                    source=result.get("source", ""),
+                    title=result.get("title", ""),
+                    text=result.get("text", ""),
+                    markdown=result.get("markdown", ""),
+                    links=result.get("links", []),
+                    metadata=result.get("metadata", {}),
+                    tactics=result.get("tactics", []),
+                    warnings=result.get("warnings", []),
+                    elapsed_ms=result.get("elapsed_ms", 0),
+                )
+                _emit(format_markdown_fetch(fr, max_chars=args.max_chars), "text", args.output)
             else:
-                _emit(result.to_dict(max_chars=args.max_chars), "json", args.output)
-            return 0 if result.ok else 2
+                _emit(result, "json", args.output)
+            return 0 if result.get("ok") else 2
 
         if args.command == "research":
-            pack = research(args.query, max_results=args.max_results, timeout=args.timeout, max_chars=args.max_chars)
+            pack = aw.research(args.query, max_results=args.max_results, timeout=args.timeout, max_chars=args.max_chars)
             if args.format == "markdown":
                 _emit(format_markdown_research(pack), "text", args.output)
             else:
@@ -127,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "deep-research":
-            result = deep_research(
+            result = aw.deep_research(
                 args.query,
                 max_results=args.max_results,
                 timeout=args.timeout,

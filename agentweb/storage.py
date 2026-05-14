@@ -1,4 +1,4 @@
-"""SQLite persistence for AgentWeb agent/task mechanics."""
+"""SQLite persistence for AgentWeb tasks, tool calls, and audits."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .mechanics import AgentDefinition, ExecutionPolicy
-
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -18,19 +16,6 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS agent_definitions (
-    name TEXT PRIMARY KEY,
-    role TEXT NOT NULL,
-    goal TEXT NOT NULL,
-    tools_json TEXT NOT NULL,
-    permissions_json TEXT NOT NULL,
-    memory_json TEXT NOT NULL,
-    model_json TEXT NOT NULL,
-    execution_policy_json TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -41,13 +26,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     error TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS agent_runtime_state (
-    agent_name TEXT PRIMARY KEY,
-    status TEXT NOT NULL DEFAULT 'active',
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(agent_name) REFERENCES agent_definitions(name) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS tool_call_records (
@@ -73,49 +51,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     request_id TEXT NOT NULL,
     details_json TEXT NOT NULL DEFAULT '{}'
 );
-
-CREATE TABLE IF NOT EXISTS conversation_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS service_config (
-    name TEXT PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    config_json TEXT NOT NULL DEFAULT '{}',
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS memory_entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    text TEXT NOT NULL,
-    source TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    scope_key TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_memory_scope ON memory_entries(scope_key);
-
-CREATE TABLE IF NOT EXISTS memory_config (
-    scope_key TEXT PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    scope_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 """
 
 
 class AgentWebStore:
-    """Small SQLite repository for local AgentWeb deployments and tests."""
+    """Small SQLite repository for local AgentWeb state."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
@@ -136,116 +76,6 @@ class AgentWebStore:
         with self.connect() as conn:
             row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
             return int(row["version"] or 0)
-
-    def table_names(self) -> set[str]:
-        with self.connect() as conn:
-            rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            return {row["name"] for row in rows}
-
-    def save_agent(self, agent: AgentDefinition, *, actor: str = "system", request_id: str = "") -> None:
-        data = agent.to_dict()
-        now = _now()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO agent_definitions(
-                    name, role, goal, tools_json, permissions_json, memory_json, model_json, execution_policy_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    role=excluded.role,
-                    goal=excluded.goal,
-                    tools_json=excluded.tools_json,
-                    permissions_json=excluded.permissions_json,
-                    memory_json=excluded.memory_json,
-                    model_json=excluded.model_json,
-                    execution_policy_json=excluded.execution_policy_json,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    agent.name,
-                    agent.role,
-                    agent.goal,
-                    _dump(data["tools"]),
-                    _dump(data["permissions"]),
-                    _dump(data["memory"]),
-                    _dump(data["model"]),
-                    _dump(data["execution_policy"]),
-                    now,
-                    now,
-                ),
-            )
-            self._audit(conn, actor=actor, action="agent.save", target=agent.name, result="ok", request_id=request_id)
-            conn.execute(
-                "INSERT OR IGNORE INTO agent_runtime_state(agent_name, status) VALUES (?, 'active')",
-                (agent.name,),
-            )
-
-    def list_agents(self) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT a.*, COALESCE(s.status, 'active') AS status
-                FROM agent_definitions a
-                LEFT JOIN agent_runtime_state s ON s.agent_name = a.name
-                ORDER BY a.name ASC
-                """
-            ).fetchall()
-        agents: list[dict[str, Any]] = []
-        for row in rows:
-            agent = self._agent_from_row(row).to_dict()
-            agent["status"] = row["status"]
-            agents.append(agent)
-        return agents
-
-    def set_agent_status(self, name: str, status: str, *, actor: str = "system", request_id: str = "") -> dict[str, Any] | None:
-        if status not in {"active", "paused", "deleted"}:
-            raise ValueError(f"Unknown agent status: {status}")
-        with self.connect() as conn:
-            exists = conn.execute("SELECT 1 FROM agent_definitions WHERE name = ?", (name,)).fetchone()
-            if exists is None:
-                return None
-            conn.execute(
-                """
-                INSERT INTO agent_runtime_state(agent_name, status)
-                VALUES (?, ?)
-                ON CONFLICT(agent_name) DO UPDATE SET status=excluded.status, updated_at=CURRENT_TIMESTAMP
-                """,
-                (name, status),
-            )
-            self._audit(conn, actor=actor, action="agent.status", target=name, result=status, request_id=request_id)
-        agent = self.load_agent(name)
-        if agent is None:
-            return None
-        data = agent.to_dict()
-        data["status"] = status
-        return data
-
-    def delete_agent(self, name: str, *, actor: str = "system", request_id: str = "") -> bool:
-        with self.connect() as conn:
-            cursor = conn.execute("DELETE FROM agent_definitions WHERE name = ?", (name,))
-            deleted = cursor.rowcount > 0
-            self._audit(conn, actor=actor, action="agent.delete", target=name, result="ok" if deleted else "missing", request_id=request_id)
-        return deleted
-
-    def load_agent(self, name: str) -> AgentDefinition | None:
-        with self.connect() as conn:
-            row = conn.execute("SELECT * FROM agent_definitions WHERE name = ?", (name,)).fetchone()
-        if row is None:
-            return None
-        return self._agent_from_row(row)
-
-    def _agent_from_row(self, row: sqlite3.Row) -> AgentDefinition:
-        policy = ExecutionPolicy(**_load(row["execution_policy_json"]))
-        return AgentDefinition(
-            name=row["name"],
-            role=row["role"],
-            goal=row["goal"],
-            tools=_load(row["tools_json"]),
-            permissions=_load(row["permissions_json"]),
-            memory=_load(row["memory_json"]),
-            model=_load(row["model_json"]),
-            execution_policy=policy,
-        )
 
     def upsert_task(
         self,
@@ -359,19 +189,6 @@ class AgentWebStore:
 
     def load(self, value: str) -> Any:
         return _load(value)
-
-    def audit(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        actor: str,
-        action: str,
-        target: str,
-        result: str,
-        request_id: str,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        self._audit(conn, actor=actor, action=action, target=target, result=result, request_id=request_id, details=details)
 
     def _audit(
         self,

@@ -13,6 +13,7 @@ import email.utils
 import html
 import json
 import os
+import math
 import re
 import shutil
 import subprocess
@@ -25,6 +26,16 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import requests
+
+from agentweb.errors import (
+    AgentWebError,
+    BotBlocked,
+    InvalidURL,
+    NoResults,
+    RateLimited,
+    Timeout,
+    map_exception,
+)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -109,7 +120,10 @@ class FetchResult:
         text = self.text.strip()
         if max_chars and len(text) > max_chars:
             text = text[:max_chars].rstrip() + "\n…[truncated]"
-        return {
+        # Lazy import to avoid circular dependency (deep_research imports from core)
+        from agentweb.deep_research import _authority_boost, _classify_source_type, _extract_date_from_text
+
+        result = {
             "url": self.url,
             "final_url": self.final_url or self.url,
             "ok": self.ok,
@@ -124,6 +138,13 @@ class FetchResult:
             "elapsed_ms": self.elapsed_ms,
             "quality_score": round(self.quality_score(), 3),
         }
+        result["meta"] = {
+            "confidence": round(self.quality_score() / 10, 3),
+            "domain_authority": _authority_boost(self.url or ""),
+            "recency_hint": _extract_date_from_text(self.text or "") or "",
+            "content_type": _classify_source_type(self.url or "", self.text or ""),
+        }
+        return result
 
 
 @dataclass
@@ -133,8 +154,26 @@ class SearchResult:
     snippet: str = ""
     source: str = ""
 
-    def to_dict(self) -> dict[str, str]:
-        return {"title": self.title, "url": self.url, "snippet": self.snippet, "source": self.source}
+    def to_dict(self) -> dict[str, Any]:
+        from agentweb.deep_research import _authority_boost, _classify_source_type, _extract_date_from_text
+
+        snippet_len = len(self.snippet.strip()) if self.snippet else 0
+        # Heuristic confidence based on snippet length and source presence
+        conf = min(snippet_len / 500, 1.0) if snippet_len else 0.2
+        if self.source:
+            conf = min(conf + 0.1, 1.0)
+        return {
+            "title": self.title,
+            "url": self.url,
+            "snippet": self.snippet,
+            "source": self.source,
+            "meta": {
+                "confidence": round(conf, 3),
+                "domain_authority": _authority_boost(self.url or ""),
+                "recency_hint": _extract_date_from_text(self.snippet or "") or "",
+                "content_type": _classify_source_type(self.url or "", self.snippet or ""),
+            },
+        }
 
 
 def _session(timeout: int = 20, cookies: str | None = None, headers: dict[str, str] | None = None) -> requests.Session:
@@ -194,7 +233,7 @@ _DEFAULT_SESSION: requests.Session | None = None
 def _safe_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url if "://" in url else "https://" + url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(f"Unsupported URL: {url}")
+        raise InvalidURL(f"Unsupported URL: {url}", url=url)
     return urllib.parse.urlunparse(parsed)
 
 
@@ -686,6 +725,39 @@ def fetch_url(
     result.tactics = tactics
     result.warnings = sorted(set(warnings))
     result.elapsed_ms = int((time.monotonic() - start) * 1000)
+
+    # Raise structured errors when no content could be fetched after all tactics.
+    if not result.ok and not text:
+        if result.status_code == 429:
+            raise RateLimited(
+                f"Rate limited fetching {url} (HTTP 429)",
+                retry_after=10,
+            )
+        if result.status_code in (401, 403):
+            raise BotBlocked(
+                f"Request blocked (HTTP {result.status_code}) fetching {url}",
+                url=url,
+            )
+        # Look for timeout signals in warnings.
+        for w in warnings:
+            w_lower = w.lower()
+            if "timeout" in w_lower or "timed out" in w_lower:
+                raise Timeout(
+                    f"Request timed out fetching {url} after {timeout}s",
+                    timeout=timeout,
+                )
+        # When a response was received, check content for block patterns.
+        if raw and _looks_blocked(raw, result.status_code):
+            raise BotBlocked(
+                "Response content suggests bot blocking or login wall",
+                url=url,
+            )
+        # Generic failure — nothing more specific to report.
+        raise AgentWebError(
+            f"Failed to fetch {url}: {'; '.join(warnings) or 'unknown error'}",
+            code="fetch_failed",
+        )
+
     return result
 
 
@@ -790,8 +862,28 @@ def _search_hn_algolia(query: str, max_results: int, timeout: int) -> list[Searc
     return items
 
 
-def research(query: str, *, max_results: int = 6, timeout: int = 20, max_chars: int = 6000) -> dict[str, Any]:
-    search_results = search_web(query, max_results=max_results, timeout=timeout)
+def research(
+    query: str,
+    *,
+    max_results: int = 6,
+    timeout: int = 20,
+    max_chars: int = 6000,
+    refine: str = "",
+    exclude_sources: list[str] | None = None,
+) -> dict[str, Any]:
+    # Apply refine: append refinement text to the search query
+    search_query = f"{query} {refine}".strip() if refine else query
+
+    search_results = search_web(search_query, max_results=max_results, timeout=timeout)
+
+    # Apply exclude_sources on search results
+    if exclude_sources:
+        exclude_lower = {s.lower() for s in exclude_sources}
+        search_results = [
+            r for r in search_results
+            if not any(excl in (r.source or "").lower() for excl in exclude_lower)
+        ]
+
     fetched: list[FetchResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(search_results)))) as pool:
         fut_map = {
@@ -805,9 +897,32 @@ def research(query: str, *, max_results: int = 6, timeout: int = 20, max_chars: 
                 sr = fut_map[fut]
                 fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"fetch_failed:{exc}"]))
     fetched.sort(key=lambda r: r.quality_score(), reverse=True)
+
+    # Apply exclude_sources on fetched results
+    if exclude_sources:
+        exclude_lower = {s.lower() for s in exclude_sources}
+        fetched = [
+            r for r in fetched
+            if not any(excl in (r.source or "").lower() for excl in exclude_lower)
+        ]
+
+    # Compute coverage and gaps using deep_research utilities
+    from agentweb.deep_research import (
+        _detect_knowledge_gaps,
+        _research_coverage_score,
+        _suggest_followups,
+    )
+
+    coverage_score = _research_coverage_score(query, fetched)
+    knowledge_gaps = _detect_knowledge_gaps(query, fetched)
+    suggested_followups = _suggest_followups(query, knowledge_gaps)
+
     return {
         "query": query,
         "generated_at": email.utils.formatdate(usegmt=True),
+        "coverage_score": round(coverage_score * 100, 1),  # 0–100% scale
+        "knowledge_gaps": knowledge_gaps,
+        "suggested_followups": suggested_followups,
         "search_results": [r.to_dict() for r in search_results],
         "sources": [r.to_dict(max_chars=max_chars) for r in fetched],
         "answer_pack": _answer_pack(query, fetched),
@@ -1434,12 +1549,17 @@ def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[S
     Results are **interleaved by source** for maximum diversity.
 
     Returns a deduplicated list of up to ``max_results`` SearchResult items.
+
+    Raises:
+        NoResults: If no results were returned by any provider.
+        Timeout: If all providers timed out.
     """
     sector = _classify_sector(query)
     providers = _SECTOR_PROVIDERS.get(sector, _SECTOR_PROVIDERS["general"])
 
     # Collect results from all providers in parallel
     all_items: list[SearchResult] = []
+    saw_timeout = False
     seen = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
         futs = [pool.submit(p, query, max_results, timeout) for p in providers]
@@ -1450,8 +1570,23 @@ def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[S
                     if key and key not in seen:
                         seen.add(key)
                         all_items.append(item)
-            except Exception:
+            except Exception as exc:
+                # Track timeouts for structured error reporting
+                exc_name = type(exc).__name__.lower()
+                if "timeout" in exc_name or "timed out" in str(exc).lower():
+                    saw_timeout = True
                 continue
+
+    if not all_items:
+        if saw_timeout:
+            raise Timeout(
+                f"All search providers timed out for query: {query[:80]}",
+                timeout=timeout,
+            )
+        raise NoResults(
+            f"No search results found for query: {query[:80]}",
+            query=query,
+        )
 
     # Interleave results by source for maximum diversity
     by_source: dict[str, list[SearchResult]] = {}
@@ -1545,9 +1680,14 @@ def search_by_provider(
     Supported providers: duckduckgo, hackernews, arxiv, wikipedia,
     reddit, bing, jina, general (falls through providers).
     Returns deduplicated SearchResult list.
+
+    Raises:
+        NoResults: If no results were returned by any backend.
+        Timeout: If all backends timed out.
     """
     backends = _SEARCH_PROVIDERS.get(provider, _SEARCH_PROVIDERS["general"])
     results: list[SearchResult] = []
+    saw_timeout = False
     seen = set()
     for backend_fn in backends:
         try:
@@ -1556,8 +1696,128 @@ def search_by_provider(
                 if key and key not in seen:
                     seen.add(key)
                     results.append(item)
-        except Exception:
+        except Exception as exc:
+            exc_name = type(exc).__name__.lower()
+            if "timeout" in exc_name or "timed out" in str(exc).lower():
+                saw_timeout = True
             continue
         if len(results) >= max_results:
             break
+
+    if not results:
+        if saw_timeout:
+            raise Timeout(
+                f"All search backends timed out for provider '{provider}' query: {query[:80]}",
+                timeout=timeout,
+            )
+        raise NoResults(
+            f"No search results from provider '{provider}' for query: {query[:80]}",
+            query=query,
+        )
     return results[:max_results]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TF-IDF NOVELTY SCORING  (used by SDK already_knows parameter)
+# ═══════════════════════════════════════════════════════════════════
+
+_RE_SHORT_TOKEN = re.compile(r"[a-zA-Z0-9]{3,}")
+
+
+def compute_novelty_scores(
+    already_knows: list[str],
+    result_texts: list[str],
+) -> list[float]:
+    """Compute TF-IDF novelty scores for each result vs ``already_knows`` texts.
+
+    Algorithm
+    ---------
+    1. Compute **TF** (raw term counts) for each term across all ``already_knows``
+       texts.
+    2. Compute **IDF** using ``log(N / df)`` where *N* is the number of result
+       texts and *df* is the number of result texts containing the term.
+    3. Build **TF-IDF vectors** (``tf * idf``) for the already-knows text and
+       for each result, then L2-normalise each vector to unit length.
+    4. **overlap_score** = cosine similarity (dot product) between the
+       normalised already-knows TF-IDF vector and each normalised result
+       TF-IDF vector.
+    5. **novel_score** = ``1 - overlap_score``.
+
+    Returns
+    -------
+    list[float]
+        One novelty score per result (0.0 = identical to already-known content,
+        1.0 = completely novel / no overlap).
+
+    Notes
+    -----
+    - Terms shorter than 3 characters are ignored.
+    - If ``already_knows`` is empty or all result texts are empty, every result
+      gets a novelty score of 1.0 (fully novel).
+    """
+    if not already_knows or not result_texts:
+        return [1.0] * len(result_texts)
+
+    # ── 1. Tokenise & build term-frequency dicts ───────────────────────
+    known_tokens = [t.lower() for t in _RE_SHORT_TOKEN.findall(" ".join(already_knows))]
+    if not known_tokens:
+        return [1.0] * len(result_texts)
+
+    known_tf: dict[str, int] = {}
+    for t in known_tokens:
+        known_tf[t] = known_tf.get(t, 0) + 1
+
+    result_tfs: list[dict[str, int]] = []
+    for text in result_texts:
+        tokens = [t.lower() for t in _RE_SHORT_TOKEN.findall(text)]
+        tf: dict[str, int] = {}
+        for t in tokens:
+            tf[t] = tf.get(t, 0) + 1
+        result_tfs.append(tf)
+
+    # All unique terms across known + all results
+    all_terms: set[str] = set(known_tf)
+    for rt in result_tfs:
+        all_terms.update(rt)
+
+    # ── 2. IDF across the result corpus ────────────────────────────────
+    N = len(result_tfs)
+    doc_freq: dict[str, int] = {}
+    for rt in result_tfs:
+        for term in rt:
+            doc_freq[term] = doc_freq.get(term, 0) + 1
+
+    # ── 3. TF-IDF vectors (L2-normalised) ──────────────────────────────
+    def _tfidf_vector(
+        tf: dict[str, int],
+        idf_weight: float = 1.0,
+    ) -> tuple[dict[str, float], float]:
+        """Build a TF-IDF vector and return (vector, L2-norm)."""
+        vec: dict[str, float] = {}
+        sq_sum = 0.0
+        for term, raw_tf in tf.items():
+            idf = doc_freq.get(term, 0)
+            # Add-one-smoothed IDF: 1 + log(N / df) guarantees idf >= 1
+            # for any present term, while rare terms get higher weight.
+            w = idf_weight * (1.0 + math.log(N / idf)) if idf > 0 else 0.0
+            val = raw_tf * w
+            vec[term] = val
+            sq_sum += val * val
+        return vec, math.sqrt(sq_sum) if sq_sum > 0 else 1.0
+
+    known_vec, known_norm_v = _tfidf_vector(known_tf)
+
+    scores: list[float] = []
+    for rt_tf in result_tfs:
+        res_vec, res_norm_v = _tfidf_vector(rt_tf)
+
+        # Cosine similarity
+        dot = sum(
+            known_vec.get(t, 0.0) * res_vec.get(t, 0.0)
+            for t in all_terms
+        )
+        overlap = dot / (known_norm_v * res_norm_v) if known_norm_v * res_norm_v > 0 else 0.0
+        overlap = max(0.0, min(1.0, overlap))
+        scores.append(1.0 - overlap)
+
+    return scores
