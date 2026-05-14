@@ -6,6 +6,8 @@ import csv
 import html
 import json
 import re
+import shutil
+import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,7 +95,43 @@ def _docx_to_text(path: Path) -> str:
 
 
 def _pdf_to_text(path: Path) -> str:
-    # Minimal fallback: extract printable text fragments from simple PDFs without adding heavyweight deps.
+    """Extract text from PDF files using multiple strategies.
+
+    Strategy 1: pdftotext (poppler-utils) — best quality, fast.
+    Strategy 2: pymupdf (import fitz) — good quality, handles complex PDFs.
+    Strategy 3: regex-based fallback — minimal extraction from raw bytes.
+    """
+    # Strategy 1: pdftotext CLI
+    pdftotext_exe = shutil.which("pdftotext")
+    if pdftotext_exe:
+        try:
+            proc = subprocess.run(
+                [pdftotext_exe, str(path), "-"],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except Exception:
+            pass
+
+    # Strategy 2: pymupdf
+    try:
+        import fitz  # type: ignore[import-untyped]
+
+        doc = fitz.open(str(path))
+        pages = []
+        for page in doc:
+            pages.append(page.get_text())
+        doc.close()
+        result = "\n\n".join(pages).strip()
+        if result:
+            return result
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Strategy 3: Regex fallback from raw bytes
     raw = path.read_bytes().decode("latin-1", errors="ignore")
     strings = re.findall(r"\(([^()]{2,})\)", raw)
     return "\n".join(html.unescape(item.replace(r"\)", ")").replace(r"\(", "(")) for item in strings)
