@@ -2,6 +2,7 @@
 
 __all__ = [
     "__version__",
+    "AgentWeb",
     "fetch_url",
     "search_web",
     "search_by_provider",
@@ -23,3 +24,4 @@ from .core import (
     search_by_provider,
     search_web,
 )
+from .sdk import AgentWeb

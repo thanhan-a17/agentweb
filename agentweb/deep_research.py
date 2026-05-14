@@ -25,11 +25,12 @@ import math
 import re
 import time
 import urllib.parse
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable, NamedTuple
 
 # AgentWeb's own imports
-from agentweb.core import fetch_url, search_by_provider, search_web, FetchResult, SearchResult
+from agentweb.core import fetch_url, search_by_provider, search_web, FetchResult, SearchResult, compute_novelty_scores
 from agentweb.safety import InputGuard
 
 # ─── Shared regexes ──────────────────────────────────────────────────────────
@@ -662,6 +663,150 @@ def _coverage_score(query: SubQuery, fetched: list[FetchResult]) -> float:
     if not scores:
         return 0.0
     return min(1.0, sum(scores) / len(scores))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RESEARCH COVERAGE + GAP DETECTION  (shared by core.research)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _research_coverage_score(query_text: str, fetched: list[FetchResult]) -> float:
+    """Compute coverage score (0.0–1.0) for a plain query string and fetched results.
+
+    Wraps ``_coverage_score`` for the research() flow which doesn't use SubQuery.
+    """
+    if not fetched:
+        return 0.0
+    query_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(query_text)}
+    if not query_terms:
+        return 0.5  # neutral
+
+    scores = []
+    for r in fetched:
+        if not r.text or len(r.text.strip()) < 200:
+            continue
+        result_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(r.text)}
+        if not result_terms:
+            continue
+        # Overlap fraction
+        overlap = len(query_terms & result_terms)
+        max_possible = len(query_terms)
+        overlap_frac = overlap / max_possible if max_possible else 0
+
+        # Density: total query term occurrences per 1000 chars
+        text_lower = r.text.lower()
+        term_density = sum(text_lower.count(t) for t in query_terms) / max(1, len(text_lower) / 1000)
+        density_factor = min(term_density / 10.0, 1.0)  # 10+ occurrences/1K chars = max
+
+        # Combined: 60% overlap presence, 40% density
+        combined = overlap_frac * 0.6 + density_factor * 0.4
+        scores.append(combined)
+
+    if not scores:
+        return 0.0
+    return min(1.0, sum(scores) / len(scores))
+
+
+def _detect_knowledge_gaps(query_text: str, fetched: list[FetchResult]) -> list[dict[str, Any]]:
+    """Detect which query terms are poorly covered across fetched results.
+
+    Returns a list of dicts sorted by coverage_level (worst first):
+        {"term": str, "coverage_level": str, "suggested_refine": str}
+
+    Coverage levels:
+        "none"   — term not found in any fetched source
+        "weak"   — term found in only 1-2 sources
+        "moderate" — term found in 3-5 sources
+        "strong" — term found in 6+ sources
+    """
+    if not fetched:
+        return []
+
+    # Extract meaningful terms from the query (skip stopwords, short tokens)
+    query_tokens = {t.lower() for t in _RE_TERM_TOKEN.findall(query_text)}
+    # Filter out very common/generic terms
+    stopwords = _ROUTER._STOPWORDS | frozenset({
+        "use", "using", "used", "get", "make", "way", "thing", "things",
+        "like", "well", "also", "one", "two", "first", "second", "last",
+        "new", "many", "much", "more", "most", "need", "want", "know",
+    })
+    meaningful_terms = query_tokens - stopwords
+
+    if not meaningful_terms:
+        return []
+
+    # Count sources per term
+    term_source_count: dict[str, int] = {t: 0 for t in meaningful_terms}
+    for r in fetched:
+        if not r.text:
+            continue
+        text_lower = r.text.lower()
+        for t in meaningful_terms:
+            if t in text_lower:
+                term_source_count[t] += 1
+
+    num_fetched = max(1, len(fetched))
+
+    gaps: list[dict[str, Any]] = []
+    for term, count in term_source_count.items():
+        ratio = count / num_fetched
+        if count == 0:
+            level = "none"
+        elif ratio < 0.25 or count <= 1:
+            level = "weak"
+        elif ratio < 0.5 or count <= 3:
+            level = "moderate"
+        else:
+            level = "strong"
+
+        gaps.append({
+            "term": term,
+            "coverage_level": level,
+            "suggested_refine": f"{query_text} {term}",
+        })
+
+    # Sort: none first, then weak, then moderate, then strong
+    level_order = {"none": 0, "weak": 1, "moderate": 2, "strong": 3}
+    gaps.sort(key=lambda g: level_order.get(g["coverage_level"], 99))
+    return gaps
+
+
+def _suggest_followups(query_text: str, knowledge_gaps: list[dict[str, Any]]) -> list[str]:
+    """Generate suggested follow-up queries based on detected knowledge gaps.
+
+    Returns up to 3 concise follow-up suggestions.
+    """
+    if not knowledge_gaps:
+        return []
+
+    # Only consider gaps that are "none" or "weak"
+    significant_gaps = [g for g in knowledge_gaps if g["coverage_level"] in ("none", "weak")]
+    if not significant_gaps:
+        return []
+
+    followups: list[str] = []
+    seen: set[str] = set()
+
+    for gap in significant_gaps:
+        refine = gap.get("suggested_refine", "")
+        if refine and refine not in seen:
+            followups.append(refine)
+            seen.add(refine)
+        if len(followups) >= 3:
+            break
+
+    # If still not enough, add broader suggestions from moderate gaps
+    if len(followups) < 2:
+        moderate_gaps = [g for g in knowledge_gaps if g["coverage_level"] == "moderate"]
+        for gap in moderate_gaps:
+            refine = gap.get("suggested_refine", "")
+            if refine and refine not in seen:
+                followups.append(refine)
+                seen.add(refine)
+            if len(followups) >= 3:
+                break
+
+    return followups
 
 
 def run_subagent(
@@ -1652,6 +1797,10 @@ def build_report(
                     "total_score": round(s.total_score, 3),
                     "bm25_score": round(s.bm25_score, 3),
                     "authority_boost": s.authority_boost,
+                    "novel_score": round(getattr(s, 'novel_score', 1.0), 3),
+                    "suppression_reason": (
+                        "already_known" if getattr(s, 'novel_score', 1.0) < 0.3 else ""
+                    ),
                 }
                 for s in scored_sources[:15]
             ],
@@ -1690,8 +1839,18 @@ def expand_query_terms(original_query: str, sub_results: list[SubAgentResult]) -
     """
     Expand the search space by extracting co-occurring terms from
     top-performing sub-agent results. Zero LLM.
+
     Algorithm: TF-IDF on fetched text → pick top terms not in original query.
+
+    .. deprecated::
+        Use ``research(query, refine=\"...\")`` or ``deep_research(query, refine=\"...\")``
+        for agent-steerable refinement instead.
     """
+    warnings.warn(
+        "expand_query_terms() is deprecated — use research(refine=...) for agent-steerable refinement.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from collections import Counter
 
     original_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(original_query)}
@@ -1739,7 +1898,16 @@ def refine_with_additional_search(
     """
     If coverage is low, do one refinement loop with expanded queries.
     Zero LLM.
+
+    .. deprecated::
+        Use ``research(refine=\"...\")`` or ``deep_research(refine=\"...\")``
+        for agent-steerable refinement instead.
     """
+    warnings.warn(
+        "refine_with_additional_search() is deprecated — use research(refine=...) for agent-steerable refinement.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     avg_coverage = sum(sr.coverage_score for sr in initial_sub_results) / len(initial_sub_results) if initial_sub_results else 0
 
     if avg_coverage > 0.5 or max_refinement_loops <= 0:
@@ -1766,14 +1934,209 @@ def refine_with_additional_search(
 # MAIN ENTRY POINT — deep_research()
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+def _deep_research_stream(
+    query: str,
+    *,
+    max_results: int = 8,
+    timeout: int = 20,
+    max_chars: int = 6000,
+    refinement_loops: int = 0,
+    refine: str | None = None,
+    guard: InputGuard | None = None,
+    already_knows: list[str] | None = None,
+) -> Iterable[dict[str, Any]]:
+    """Generator that runs the full deep research pipeline but yields
+    intermediate phase dicts so callers can consume progress incrementally.
+
+    Yields the following dicts in order:
+
+    - ``{"phase": "decompose", "query": str, "branches": [SubQuery dicts]}``
+    - ``{"phase": "search", "branch": str, "results": [SearchResult dicts]}``
+        — once per sub-agent after its search completes
+    - ``{"phase": "fetch", "branch": str, "sources": [FetchResult dicts]}``
+        — once per sub-agent after its fetch completes
+    - ``{"phase": "rank", "sources": [ScoredSource dicts]}``
+    - ``{"phase": "evidence", "claims": [EvidenceClaim dicts]}``
+    - ``{"phase": "complete", "report": {...}}`` — the final report dict
+    """
+    start_time = time.time()
+
+    # 0. Safety guard
+    if guard is None:
+        guard = InputGuard()
+    guard.validate_text(query)
+
+    # Augment query with refine steering (if provided)
+    effective_query = f"{query} refine: {refine}" if refine else query
+
+    # 1. Query decomposition
+    plan = decompose_query(effective_query)
+    providers = route_providers(effective_query, plan.intent)
+
+    # --- yield decompose phase ---
+    yield {
+        "phase": "decompose",
+        "query": effective_query,
+        "branches": [_subquery_to_dict(q) for q in plan.sub_queries],
+    }
+
+    # 2. Dispatch sub-agents in parallel
+    sub_results: list[SubAgentResult] = []
+    branch_count = plan.branch_count
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=branch_count) as pool:
+        fut_map = {
+            pool.submit(run_subagent, sq, providers, timeout, max_chars): sq
+            for sq in plan.sub_queries
+        }
+        for fut in concurrent.futures.as_completed(fut_map):
+            sq = fut_map[fut]
+            try:
+                sr: SubAgentResult = fut.result()
+                sub_results.append(sr)
+
+                # --- yield search results for this branch ---
+                yield {
+                    "phase": "search",
+                    "branch": sq.id,
+                    "results": [r.to_dict() for r in sr.search_results],
+                }
+
+                # --- yield fetch sources for this branch ---
+                yield {
+                    "phase": "fetch",
+                    "branch": sq.id,
+                    "sources": [r.to_dict(max_chars=max_chars) for r in sr.fetched_results],
+                }
+
+            except Exception as exc:
+                sub_results.append(
+                    SubAgentResult(
+                        sub_query_id=sq.id,
+                        search_results=[],
+                        fetched_results=[],
+                        entity_facts=[],
+                        coverage_score=0.0,
+                        warnings=[f"subagent_failed:{exc}"],
+                    )
+                )
+
+    # 3. Refinement loop (if needed — off by default, kept for backward compat)
+    if refinement_loops > 0:
+        sub_results = refine_with_additional_search(
+            plan, sub_results, [], max_refinement_loops=refinement_loops, timeout=timeout
+        )
+
+    # 4. Rank all sources
+    scored_sources = rank_sources(sub_results, effective_query, plan.intent)
+
+    # ── TF-IDF novelty scoring against already_knows ──────────────────
+    if already_knows:
+        texts = [s.result.text or "" for s in scored_sources]
+        novel_scores = compute_novelty_scores(already_knows, texts)
+        for s, ns in zip(scored_sources, novel_scores):
+            s.novel_score = round(ns, 3)
+        # Re-rank: boost novelty (50% original score + 50% novelty)
+        max_score = max(s.total_score for s in scored_sources) if scored_sources else 1.0
+        for s in scored_sources:
+            s.total_score = 0.5 * (s.total_score / max_score) + 0.5 * getattr(s, 'novel_score', 0.5)
+        scored_sources.sort(key=lambda x: x.total_score, reverse=True)
+    else:
+        for s in scored_sources:
+            s.novel_score = 1.0  # default: fully novel
+
+    # --- yield rank phase ---
+    yield {
+        "phase": "rank",
+        "sources": [
+            {
+                "url": s.result.final_url or s.result.url,
+                "title": s.result.title,
+                "bm25_score": round(s.bm25_score, 3),
+                "authority_boost": s.authority_boost,
+                "coverage_boost": s.coverage_boost,
+                "total_score": round(s.total_score, 3),
+                "quality_score": s.result.quality_score(),
+                "novel_score": round(getattr(s, 'novel_score', 1.0), 3),
+            }
+            for s in scored_sources[:15]
+        ],
+    }
+
+    # 5. Extract evidence
+    claims = extract_evidence(scored_sources, effective_query, plan.intent, max_claims=20)
+
+    # 5b. Add structured facts from table/key-value extraction
+    table_claims: list[EvidenceClaim] = []
+    seen_table_keys: set[str] = set()
+    for sr in sub_results:
+        for fact in sr.entity_facts:
+            if fact["type"] in ("table_cell", "key_value"):
+                key = f"{fact.get('field','')}:{fact['value']}"
+                h = hashlib.md5(key.lower().encode()).hexdigest()[:12]
+                if h not in seen_table_keys:
+                    seen_table_keys.add(h)
+                    table_claims.append(EvidenceClaim(
+                        sentence=fact.get("context", fact["value"]),
+                        source_url="",
+                        source_title="",
+                        claim_type="stat" if re.search(r"\d", fact["value"]) else "fact",
+                        relevance_score=0.5,
+                    ))
+    # Merge with sentence-level claims, keeping top-N by relevance
+    all_claims = sorted(claims + table_claims, key=lambda c: c.relevance_score, reverse=True)
+    claims = all_claims[:20]
+
+    # --- yield evidence phase ---
+    yield {
+        "phase": "evidence",
+        "claims": [
+            {
+                "sentence": c.sentence,
+                "source_url": c.source_url,
+                "source_title": c.source_title,
+                "claim_type": c.claim_type,
+                "relevance_score": round(c.relevance_score, 3),
+            }
+            for c in claims
+        ],
+    }
+
+    # 6. Detect contradictions
+    contradictions = detect_contradictions(claims)
+
+    # 7. Build report
+    report = build_report(effective_query, plan, sub_results, scored_sources, claims, contradictions)
+
+    elapsed = time.time() - start_time
+
+    final_report = {
+        "query": query,
+        "elapsed_seconds": round(elapsed, 1),
+        "report_markdown": report["report_markdown"],
+        "report_json": report["report_json"],
+    }
+    if refine:
+        final_report["refine"] = refine
+
+    # --- yield complete phase with the final report ---
+    yield {
+        "phase": "complete",
+        "report": final_report,
+    }
+
+
 def deep_research(
     query: str,
     *,
     max_results: int = 8,
     timeout: int = 20,
     max_chars: int = 6000,
-    refinement_loops: int = 1,
+    refinement_loops: int = 0,
+    refine: str | None = None,
     guard: InputGuard | None = None,
+    already_knows: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     AgentWeb's deep research pipeline. Zero LLM calls.
@@ -1782,6 +2145,14 @@ def deep_research(
       Query Plan → Sub-Agent Dispatch → Parallel Search/Fetch →
       BM25 Ranking → Evidence Extraction → Contradiction Detection →
       (Optional) Refinement Loop → Report Generation
+
+    Parameters
+    ----------
+    query : str
+        The research query.
+    refine : str | None, optional
+        Agent-steerable refinement string appended to the query
+        (e.g., ``"pricing"`` or ``"technical specifications"``).
 
     Returns a dict with both 'report_markdown' (human-readable) and
     'report_json' (structured).
@@ -1793,9 +2164,12 @@ def deep_research(
         guard = InputGuard()
     guard.validate_text(query)
 
+    # Augment query with refine steering (if provided)
+    effective_query = f"{query} refine: {refine}" if refine else query
+
     # 1. Query decomposition
-    plan = decompose_query(query)
-    providers = route_providers(query, plan.intent)
+    plan = decompose_query(effective_query)
+    providers = route_providers(effective_query, plan.intent)
 
     # 2. Dispatch sub-agents in parallel (one per sub-query)
     branch_count = plan.branch_count
@@ -1821,16 +2195,32 @@ def deep_research(
                     )
                 )
 
-    # 3. Refinement loop (if needed)
-    sub_results = refine_with_additional_search(
-        plan, sub_results, [], max_refinement_loops=refinement_loops, timeout=timeout
-    )
+    # 3. Refinement loop (if needed — off by default, kept for backward compat)
+    if refinement_loops > 0:
+        sub_results = refine_with_additional_search(
+            plan, sub_results, [], max_refinement_loops=refinement_loops, timeout=timeout
+        )
 
     # 4. Rank all sources
-    scored_sources = rank_sources(sub_results, query, plan.intent)
+    scored_sources = rank_sources(sub_results, effective_query, plan.intent)
+
+    # ── TF-IDF novelty scoring against already_knows ──────────────────
+    if already_knows:
+        texts = [s.result.text or "" for s in scored_sources]
+        novel_scores = compute_novelty_scores(already_knows, texts)
+        for s, ns in zip(scored_sources, novel_scores):
+            s.novel_score = round(ns, 3)
+        # Re-rank: blend original score with novelty
+        max_score = max(s.total_score for s in scored_sources) if scored_sources else 1.0
+        for s in scored_sources:
+            s.total_score = 0.5 * (s.total_score / max_score) + 0.5 * getattr(s, 'novel_score', 0.5)
+        scored_sources.sort(key=lambda x: x.total_score, reverse=True)
+    else:
+        for s in scored_sources:
+            s.novel_score = 1.0  # default
 
     # 5. Extract evidence
-    claims = extract_evidence(scored_sources, query, plan.intent, max_claims=20)
+    claims = extract_evidence(scored_sources, effective_query, plan.intent, max_claims=20)
 
     # 5b. Add structured facts from table/key-value extraction
     table_claims: list[EvidenceClaim] = []
@@ -1857,13 +2247,16 @@ def deep_research(
     contradictions = detect_contradictions(claims)
 
     # 7. Build report
-    report = build_report(query, plan, sub_results, scored_sources, claims, contradictions)
+    report = build_report(effective_query, plan, sub_results, scored_sources, claims, contradictions)
 
     elapsed = time.time() - start_time
 
-    return {
+    result = {
         "query": query,
         "elapsed_seconds": round(elapsed, 1),
         "report_markdown": report["report_markdown"],
         "report_json": report["report_json"],
     }
+    if refine:
+        result["refine"] = refine
+    return result
