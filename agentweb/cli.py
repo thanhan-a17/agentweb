@@ -22,13 +22,25 @@ def _headers(values: list[str] | None) -> dict[str, str]:
     return out
 
 
+def _parse_int_or_range(value: str) -> int:
+    """Parse an int or a range like \"8-12\" and return (low + high) // 2."""
+    if "-" in value:
+        parts = value.split("-", 1)
+        if parts[0].strip().isdigit() and parts[1].strip().isdigit():
+            low, high = int(parts[0]), int(parts[1])
+            return (low + high) // 2
+    return int(value)
+
+
 def _emit(data, fmt: str, output: str | None = None) -> None:
     if fmt == "json":
         text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     else:
         text = str(data)
     if output:
-        Path(output).expanduser().write_text(text, encoding="utf-8")
+        path = Path(output).expanduser()
+        path.write_text(text, encoding="utf-8")
+        sys.stderr.write(f"\u2713 wrote {len(text)} bytes to {path}\n")
     else:
         sys.stdout.write(text)
 
@@ -43,15 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("search", help="Search the web with resilient no-key providers.")
     s.add_argument("query")
-    s.add_argument("--max-results", type=int, default=8)
-    s.add_argument("--timeout", type=int, default=20)
+    s.add_argument("--max-results", type=_parse_int_or_range, default=8)
+    s.add_argument("--timeout", type=int, default=30)
     s.add_argument("--format", choices=["json", "markdown"], default="json")
     s.add_argument("--output", "-o")
 
     f = sub.add_parser("fetch", help="Fetch one URL using layered extraction tactics.")
     f.add_argument("url")
-    f.add_argument("--timeout", type=int, default=20)
-    f.add_argument("--max-chars", type=int, default=12000)
+    f.add_argument("--timeout", type=int, default=30)
+    f.add_argument("--max-chars", type=_parse_int_or_range, default=12000)
     f.add_argument("--cookies", help="Cookie header string or Netscape cookies.txt path for logged-in pages.")
     f.add_argument("--header", action="append", help="Extra request header, e.g. Authorization: Bearer TOKEN")
     f.add_argument("--no-jina", action="store_true", help="Disable Jina reader fallback.")
@@ -61,17 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("research", help="Search + fetch top sources and emit an agent-ready evidence pack.")
     r.add_argument("query")
-    r.add_argument("--max-results", type=int, default=6)
-    r.add_argument("--timeout", type=int, default=20)
-    r.add_argument("--max-chars", type=int, default=6000)
+    r.add_argument("--max-results", type=_parse_int_or_range, default=6)
+    r.add_argument("--timeout", type=int, default=30)
+    r.add_argument("--max-chars", type=_parse_int_or_range, default=6000)
     r.add_argument("--format", choices=["json", "markdown"], default="json")
     r.add_argument("--output", "-o")
 
     dr = sub.add_parser("deep-research", help="Multi-branch deep research: decompose, parallel fetch, BM25 rank, extract evidence. No LLM.")
     dr.add_argument("query")
-    dr.add_argument("--max-results", type=int, default=8)
-    dr.add_argument("--timeout", type=int, default=20)
-    dr.add_argument("--max-chars", type=int, default=6000)
+    dr.add_argument("--max-results", type=_parse_int_or_range, default=8)
+    dr.add_argument("--timeout", type=int, default=30)
+    dr.add_argument("--max-chars", type=_parse_int_or_range, default=6000)
     dr.add_argument("--refinement-loops", type=int, default=1)
     dr.add_argument("--format", choices=["json", "markdown"], default="markdown")
     dr.add_argument("--output", "-o")

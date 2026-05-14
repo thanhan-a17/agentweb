@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """AgentWeb core web-access engine.
 
 The design goal is boring but useful: one CLI call gives an agent a compact,
@@ -14,6 +15,7 @@ import html
 import json
 import os
 import math
+import random
 import re
 import shutil
 import subprocess
@@ -36,6 +38,7 @@ from agentweb.errors import (
     Timeout,
     map_exception,
 )
+from agentweb.authenticity import ContentAuthenticity
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -43,10 +46,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
 ]
 
-BLOCK_PATTERNS = re.compile(
-    r"captcha|cloudflare|access denied|verify you are human|unusual traffic|bot detection|blocked",
-    re.I,
-)
 TEXT_MIME_HINTS = ("text/", "application/json", "application/xml", "application/xhtml+xml")
 
 
@@ -268,8 +267,8 @@ def _clean_text(text: str) -> str:
 
 def _extract_title(raw: str) -> str:
     for pattern in [
-        r'(?is)<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)',
-        r'(?is)<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)',
+        r'(?is)<meta[^>]+property=[\'"]og:title["\'][^>]+content=[\'"]([^\'"]+)',
+        r'(?is)<meta[^>]+name=[\'"]twitter:title["\'][^>]+content=[\'"]([^\'"]+)',
         r"(?is)<title[^>]*>(.*?)</title>",
         r"(?is)<h1[^>]*>(.*?)</h1>",
     ]:
@@ -336,10 +335,146 @@ def _extract_nextjs_payload(raw: str) -> str:
     return cleaned[:20000]
 
 
-def _looks_blocked(text: str, status_code: int | None) -> bool:
-    if status_code in {401, 403, 429, 503}:
-        return True
-    return bool(BLOCK_PATTERNS.search(text[:5000]))
+def _is_reddit_url(url: str) -> bool:
+    """Check if a URL is a Reddit page (www.reddit.com, old.reddit.com, etc.)."""
+    parsed = urllib.parse.urlparse(url)
+    domain = parsed.netloc.lower()
+    return domain.endswith("reddit.com")
+
+
+def _fetch_reddit(url: str, timeout: int) -> FetchResult | None:
+    """Fetch a Reddit post+comments using www.reddit.com/<path>.json.
+
+    Reddit's native JSON API (``www.reddit.com/<path>.json``) is the most
+    reliable way to get structured post+comment content without being
+    blocked.  Critical details:
+
+    * Keep **www.reddit.com** — ``old.reddit.com`` and ``new.reddit.com``
+      are blocked for automated requests.
+    * Use a **fresh session** — sharing the default session's cookies/UA
+      can trigger rate-limiting.
+    * Use a Windows Chrome UA — Mac UAs are disproportionately blocked
+      on Reddit.
+
+    Returns a FetchResult with structured post content and top comments,
+    or None if the JSON API is unreachable.
+    """
+    start = time.monotonic()
+
+    # Keep www.reddit.com — old.reddit.com blocks bots harder
+    rewritten = url.replace("old.reddit.com", "www.reddit.com")
+    rewritten = rewritten.replace("new.reddit.com", "www.reddit.com")
+    rewritten = rewritten.replace("://reddit.com/", "://www.reddit.com/")
+
+    # Append .json to the path
+    parsed = urllib.parse.urlparse(rewritten)
+    path = parsed.path.rstrip("/")
+    json_path = path + ".json"
+    rewritten = urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, json_path, parsed.params, parsed.query, parsed.fragment)
+    )
+
+    # Use a fresh session with different UA to avoid shared-session rate-limiting
+    s = requests.Session()
+    s.headers.update({
+        # Windows Chrome — Mac UAs get blocked more often on Reddit
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain;q=0.9",
+        "Accept-Language": "en-US,en;q=0.9",
+        "DNT": "1",
+        "Referer": "https://www.google.com/",
+    })
+
+    try:
+        resp = s.get(rewritten, timeout=timeout)
+        if resp.status_code >= 400:
+            return None
+
+        data = resp.json()
+        elapsed = int((time.monotonic() - start) * 1000)
+
+        # The response is a list: [post_listing, comments_listing]
+        if isinstance(data, list):
+            post_listing = data[0] if len(data) > 0 else {}
+            comments_listing = data[1] if len(data) > 1 else {}
+        else:
+            post_listing = data
+            comments_listing = {}
+
+        # Extract post
+        post_children = post_listing.get("data", {}).get("children", [])
+        post = post_children[0].get("data", {}) if post_children else {}
+
+        title = post.get("title", "")
+        selftext = post.get("selftext", "") or ""
+        url_text = post.get("url", "")
+        domain = post.get("domain", "")
+        subreddit = post.get("subreddit", "")
+        score = post.get("score", 0)
+        num_comments = post.get("num_comments", 0)
+        author = post.get("author", "")
+        created_utc = post.get("created_utc", 0)
+
+        # Build rich content
+        parts = [f"# {title}"]
+        parts.append(f"subreddit: r/{subreddit} | author: u/{author} | score: {score} | comments: {num_comments}")
+        if domain and not domain.startswith("self.") and domain != subreddit:
+            parts.append(f"external_link: {url_text}")
+        parts.append("")
+        if selftext:
+            parts.append(selftext)
+        parts.append("")
+
+        # Add top comments
+        comment_children = comments_listing.get("data", {}).get("children", [])
+        if comment_children:
+            parts.append("## Comments")
+            for child in comment_children[:10]:  # top 10 comments
+                cd = child.get("data", {})
+                if cd.get("body"):
+                    parts.append(
+                        f"> u/{cd.get('author', '[deleted]')} "
+                        f"({cd.get('score', 0)} pts): "
+                        f"{cd['body'][:500]}"
+                    )
+                # Include replies (one level deep)
+                replies = cd.get("replies", {})
+                if isinstance(replies, dict):
+                    reply_children = replies.get("data", {}).get("children", [])
+                    for rc in reply_children[:3]:
+                        rd = rc.get("data", {})
+                        if rd.get("body"):
+                            parts.append(
+                                f"> > u/{rd.get('author', '[deleted]')} "
+                                f"({rd.get('score', 0)} pts): "
+                                f"{rd['body'][:250]}"
+                            )
+
+        text = "\n".join(parts)
+
+        return FetchResult(
+            url=url,
+            final_url=resp.url,
+            ok=True,
+            status_code=resp.status_code,
+            source="reddit_json_api",
+            title=title,
+            text=text,
+            metadata={
+                "subreddit": subreddit,
+                "score": str(score),
+                "comments": str(num_comments),
+                "author": author,
+            },
+            tactics=["reddit_json_api", "fresh_session"],
+            elapsed_ms=elapsed,
+        )
+    except Exception:
+        return None
 
 
 def _is_wikipedia_url(url: str) -> str | None:
@@ -671,7 +806,16 @@ def fetch_url(
             arxiv_result.elapsed_ms = max(arxiv_result.elapsed_ms, int((time.monotonic() - start) * 1000))
             return arxiv_result
 
-    # ── Generic HTTP fetch ──
+    # Reddit special handling: dedicated JSON API fetch for post + comments
+    if _is_reddit_url(url):
+        reddit_result = _fetch_reddit(url, timeout)
+        if reddit_result and reddit_result.ok and reddit_result.text:
+            reddit_result.elapsed_ms = max(reddit_result.elapsed_ms, int((time.monotonic() - start) * 1000))
+            warnings.append("used_reddit_specialized_fetch")
+            return reddit_result
+        # If Reddit specialized fetch failed, fall through to generic HTTP
+
+    # ── Phase 1: Generic HTTP fetch ──
     s = _session(timeout=timeout, cookies=cookies, headers=headers)
     raw = ""
     response: requests.Response | None = None
@@ -699,25 +843,38 @@ def fetch_url(
         result.title = _extract_title(raw)
         result.links = _extract_links(raw, result.final_url or url)
         result.metadata = _extract_metadata(raw, response)
-        if _looks_blocked(raw + "\n" + text, result.status_code):
-            warnings.append("possible_bot_block_or_login_wall")
 
-    # Jina reader is excellent for article-like public pages and often beats ad-heavy HTML.
-    if use_jina and (not text or len(text) < 1200 or warnings):
+    # ── Content authenticity assessment ──
+    # Domain-agnostic: we check if the response actually contains real content.
+    # No domain whitelist, no per-site config — just signal analysis.
+    authenticity = ContentAuthenticity.score(text, raw, result.status_code)
+
+    # ── Phase 2: Jina Reader fallback ──
+    # Try Jina when content looks suspicious (low authenticity score).
+    # Jina is excellent for article-like pages and often bypasses bot guards
+    # or ad-heavy markup that direct HTTP can't handle.
+    if use_jina and authenticity < ContentAuthenticity.SUSPICIOUS_THRESHOLD:
         jina = _fetch_jina(url, timeout=timeout)
-        if jina and len(jina.text) > len(text):
-            tactics.append("jina_reader")
-            text = jina.text
-            result.title = result.title or jina.title
-            result.metadata.update(jina.metadata)
-            warnings.extend(jina.warnings)
+        if jina:
+            jina_auth = ContentAuthenticity.score(jina.text, "")
+            if jina_auth > authenticity:
+                tactics.append("jina_reader")
+                text = jina.text
+                authenticity = jina_auth
+                result.title = result.title or jina.title
+                result.metadata.update(jina.metadata)
+                warnings.extend(jina.warnings)
 
-    # Optional browser fallback. Kept opt-in because browsers are expensive.
-    if use_browser and (not text or _looks_blocked(text, result.status_code)):
+    # ── Phase 3: Browser fallback (opt-in, expensive) ──
+    # Only escalate to a browser when content is clearly blocked.
+    if use_browser and authenticity < ContentAuthenticity.BLOCKED_THRESHOLD:
         browser_text = _fetch_with_agent_browser(url, timeout=timeout)
-        if browser_text and len(browser_text) > len(text):
-            tactics.append("agent_browser_snapshot")
-            text = browser_text
+        if browser_text:
+            browser_auth = ContentAuthenticity.score(browser_text, "")
+            if browser_auth > authenticity:
+                tactics.append("agent_browser_snapshot")
+                text = browser_text
+                authenticity = browser_auth
 
     result.text = text[:max_chars] if max_chars else text
     result.ok = bool(text) and not (result.status_code and result.status_code >= 500)
@@ -746,8 +903,9 @@ def fetch_url(
                     f"Request timed out fetching {url} after {timeout}s",
                     timeout=timeout,
                 )
-        # When a response was received, check content for block patterns.
-        if raw and _looks_blocked(raw, result.status_code):
+        # When a response was received but no text could be extracted,
+        # it's likely a block or a non-text response.
+        if raw and ContentAuthenticity.is_blocked(raw, "", result.status_code):
             raise BotBlocked(
                 "Response content suggests bot blocking or login wall",
                 url=url,
@@ -1223,7 +1381,12 @@ def _search_reddit_api(query: str, max_results: int, timeout: int) -> list[Searc
             "t": "all",
         }
     )
-    headers = {"User-Agent": "AgentWeb/0.1 (by /u/agentweb_search)"}
+    # Rotate User-Agent to avoid Reddit's bot detection
+    ua = random.choice(USER_AGENTS) if USER_AGENTS else "AgentWeb/0.1 (by /u/agentweb_search)"
+    headers = {
+        "User-Agent": ua,
+        "Accept": "application/json",
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=timeout)
         if resp.status_code >= 400:
@@ -1328,9 +1491,9 @@ def _search_nominatim(query: str, max_results: int, timeout: int) -> list[Search
             osm_url = f"https://www.openstreetmap.org/{osm_type}/{osm_id}"
             snippet = f"{category}/{place_type}"
             if lat and lon:
-                snippet += f" \u2022 {lat}, {lon}"
+                snippet += f" • {lat}, {lon}"
             if display:
-                snippet += f" \u2014 {display[:150]}"
+                snippet += f" — {display[:150]}"
             if name:
                 items.append(SearchResult(name, osm_url, snippet, "nominatim"))
             if len(items) >= max_results:
@@ -1667,6 +1830,7 @@ _SEARCH_PROVIDERS: dict[str, list] = {
     "stackexchange": [_search_stackexchange_api],
     "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia, _search_reddit_api, _search_stackexchange_api],
 }
+
 
 def search_by_provider(
     provider: str,
