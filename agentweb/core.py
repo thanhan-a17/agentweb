@@ -423,24 +423,6 @@ def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
     return ""
 
 
-def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
-    providers = [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia]
-    results: list[SearchResult] = []
-    seen = set()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
-        futs = [pool.submit(p, query, max_results, timeout) for p in providers]
-        for fut in concurrent.futures.as_completed(futs):
-            try:
-                for item in fut.result():
-                    key = _canonical_url(item.url)
-                    if key and key not in seen:
-                        seen.add(key)
-                        results.append(item)
-            except Exception:
-                continue
-    return results[:max_results]
-
-
 def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
     resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
@@ -749,22 +731,443 @@ def _search_jina_general(query: str, max_results: int, timeout: int) -> list[Sea
     return _search_via_jina_reader(query, max_results, timeout)
 
 
+def _search_github_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search GitHub repositories via the public search API.
+
+    No API key required (rate-limited to 60/hr without key, 10/min for
+    the search endpoint).  Returns repos with stars, description, and
+    language — excellent for technical/niche queries.
+
+    Source tag: "github"
+    """
+    url = "https://api.github.com/search/repositories?" + urllib.parse.urlencode(
+        {"q": query, "sort": "stars", "order": "desc", "per_page": min(max_results, 25)}
+    )
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": "AgentWeb/0.1",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            return []
+        data = resp.json()
+        items: list[SearchResult] = []
+        for repo in data.get("items", []):
+            name = repo.get("full_name", "") or repo.get("name", "")
+            repo_url = repo.get("html_url", "")
+            description = (repo.get("description") or "")[:200]
+            stars = repo.get("stargazers_count", 0)
+            language = repo.get("language") or ""
+            snippet = f"⭐ {stars} stars"
+            if language:
+                snippet += f" | {language}"
+            if description:
+                snippet = f"{description} — {snippet}"
+            if name and repo_url:
+                items.append(SearchResult(name, repo_url, snippet, "github"))
+            if len(items) >= max_results:
+                break
+        return items
+    except Exception:
+        return []
+
+
+def _search_reddit_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search Reddit using the public Reddit JSON API.
+
+    Returns real Reddit posts with title, URL, score, comments, and subreddit.
+    No API key required — Reddit's public JSON endpoint is free and accessible
+    with a proper User-Agent.
+
+    Rate limit: ~60 req/min unauthenticated.
+    """
+    url = "https://www.reddit.com/search.json?" + urllib.parse.urlencode(
+        {
+            "q": query,
+            "sort": "relevance",
+            "limit": min(max_results, 25),
+            "raw_json": 1,
+            "t": "all",
+        }
+    )
+    headers = {"User-Agent": "AgentWeb/0.1 (by /u/agentweb_search)"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            return []
+        data = resp.json()
+        items: list[SearchResult] = []
+        for child in data.get("data", {}).get("children", []):
+            d = child.get("data", {})
+            title = d.get("title", "")
+            permalink = d.get("permalink", "")
+            # Reddit post URL: external link for link posts, permalink for self posts
+            post_url = d.get("url", "")
+            if d.get("is_self") or not post_url or "reddit.com" in post_url.lower():
+                post_url = "https://www.reddit.com" + permalink
+            subreddit = d.get("subreddit", "")
+            score = d.get("score", 0)
+            comments = d.get("num_comments", 0)
+            # Build rich snippet
+            selftext = (d.get("selftext") or "")[:250]
+            sentence = (
+                selftext.replace("\n", " ").strip()
+                if selftext
+                else d.get("domain", "")
+            )
+            snippet = f"[r/{subreddit}] Score: {score} | Comments: {comments}"
+            if sentence:
+                snippet = f"{sentence[:200]} — {snippet}"
+            items.append(SearchResult(title, post_url, snippet, "reddit"))
+            if len(items) >= max_results:
+                break
+        return items
+    except Exception:
+        return []
+
+
 def _search_reddit_site(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     """Search Reddit via Jina general search with site:reddit.com operator."""
     site_query = f"site:reddit.com {query}"
     return _search_jina_general(site_query, max_results, timeout)
 
 
+def _search_twitter_site(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search X/Twitter via DDG/Jina with site operators.
+
+    Twitter's API requires OAuth, so we use ``site:twitter.com OR site:x.com``
+    through DuckDuckGo HTML and Jina Reader in sequence.  Catches tweets
+    and X posts in search results.
+
+    Falls back cleanly with 0 results when Twitter content isn't indexed
+    (common with modern Twitter restrictions).  The other 4 providers in
+    the broad pipeline still deliver diverse results.
+
+    Returns: SearchResult list with source="twitter".
+    """
+    site_query = f"site:twitter.com OR site:x.com {query}"
+    # Try DDG HTML first (better for site: operator queries)
+    try:
+        results = _search_duckduckgo_html(site_query, max_results, timeout)
+        if results:
+            for r in results:
+                r.source = "twitter"
+            return results
+    except Exception:
+        pass
+    # Fallback: Jina Reader through DDG
+    return _search_jina_general(site_query, max_results, timeout)
+
+
 # Provider dispatch table
+def _search_nominatim(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search OpenStreetMap Nominatim for places, locations, food, travel.
+
+    Free, no API key required (needs a polite User-Agent per their ToS).
+    Returns: display name, OSM link, location type, lat/lon.
+
+    Rate limit: 1 req/sec — be nice. Returns 0 results on 429.
+    Source tag: "nominatim"
+    """
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": query,
+        "format": "jsonv2",
+        "limit": min(max_results, 10),
+        "addressdetails": 0,
+    }
+    headers = {"User-Agent": "AgentWeb/0.1 (place search; nominatim@agentweb.dev)"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            return []
+        data = resp.json()
+        items: list[SearchResult] = []
+        for place in data:
+            display = place.get("display_name", "")
+            name = display.split(",")[0] if display else "Unknown place"
+            place_type = place.get("type", "")
+            category = place.get("category", "")
+            lat = place.get("lat", "")
+            lon = place.get("lon", "")
+            osm_type = place.get("osm_type", "node")
+            osm_id = place.get("osm_id", 0)
+            osm_url = f"https://www.openstreetmap.org/{osm_type}/{osm_id}"
+            snippet = f"{category}/{place_type}"
+            if lat and lon:
+                snippet += f" \u2022 {lat}, {lon}"
+            if display:
+                snippet += f" \u2014 {display[:150]}"
+            if name:
+                items.append(SearchResult(name, osm_url, snippet, "nominatim"))
+            if len(items) >= max_results:
+                break
+        return items
+    except Exception:
+        return []
+
+# ═══════════════════════════════════════════════════════════════════
+# SECTOR ROUTER — classify queries into domains, route to relevant providers
+# ═══════════════════════════════════════════════════════════════════
+
+# Sector seed terms for query classification.
+# Multi-word seeds get 3× weight (stronger signal).
+_SECTOR_SEEDS: dict[str, set[str]] = {
+    "tech": {
+        "code", "coding", "programming", "software", "app", "apps",
+        "api", "framework", "library", "github", "git", "deploy",
+        "server", "database", "python", "javascript", "react", "docker",
+        "linux", "windows", "macos", "cli", "terminal", "algorithm",
+        "bug", "error", "crash", "compile", "runtime", "debug",
+        "startup", "saas", "cloud", "devops", "kubernetes", "aws",
+        "ai", "ml", "llm", "neural", "gpu", "tensorflow", "pytorch",
+        "website", "web", "backend", "frontend", "fullstack",
+        "computer", "laptop", "monitor", "keyboard", "tech",
+        "download", "install", "setup", "configuration",
+        "tutorial", "guide", "documentation",
+    },
+    "food": {
+        "food", "foods", "recipe", "recipes", "cook", "cooking", "bake", "baking",
+        "restaurant", "restaurants", "cafe", "cuisine", "dish", "dishes",
+        "meal", "meals", "dinner", "dinners", "lunch", "breakfast", "ingredient", "chef", "kitchen",
+        "delicious", "tasty", "flavor", "spicy", "sweet",
+        "pho", "pizza", "pasta", "sushi", "burger", "salad",
+        "chicken", "beef", "pork", "fish", "vegetarian", "vegan",
+        "wine", "coffee", "tea", "beer", "cocktail",
+        "nutrition", "calories", "healthy eating",
+        "eat", "dining", "brunch",
+        "bread", "soup", "sauce", "pancake", "pancakes",
+        "chocolate", "cheese", "butter", "rice", "noodle", "noodles",
+        "fruit", "vegetable", "vegetables", "tofu", "egg", "eggs",
+        "bake", "roast", "roasting", "grill", "fry", "frying",
+        "yummy", "homemade", "organic",
+        "snack", "snacks",
+    },
+    "travel": {
+        "travel", "trip", "trips", "vacation", "holiday", "holidays",
+        "tourist", "tourism", "tour",
+        "hotel", "hotels", "hostel", "hostels", "resort", "resorts",
+        "flight", "flights", "airport", "airports", "airline", "airlines",
+        "destination", "destinations", "visit", "sightseeing", "attraction", "attractions",
+        "beach", "beaches", "mountain", "mountains", "hiking", "camping", "road trip",
+        "passport", "visa", "backpacking", "cruise",
+        "city", "cities", "country", "countries", "province", "island", "islands", "abroad",
+        "map", "direction", "directions", "location", "address", "near me",
+        "museum", "museums", "park", "parks", "temple", "church", "churches", "market",
+        "accommodation", "lodging",
+        "itinerary", "explore", "wander",
+    },
+    "shopping": {
+        "buy", "purchase", "order", "shop", "shopping", "store",
+        "product", "price", "cost", "cheap", "expensive", "deal",
+        "discount", "sale", "coupon", "offer",
+        "amazon", "ebay", "etsy", "walmart", "aliexpress",
+        "delivery", "shipping", "return", "warranty",
+        "review", "reviews", "rating", "ratings", "top",
+        "gift", "gifts", "present", "accessory", "fashion", "clothing",
+        "electronics", "gadget", "gadgets", "furniture", "decor",
+        "headphones", "speaker", "speakers", "laptop", "laptops",
+        "phone", "phones", "tablet", "tablets", "camera", "cameras",
+        "tv", "monitor", "monitors", "printer", "printers",
+    },
+    "health": {
+        "health", "healthy", "fitness", "exercise", "workout",
+        "diet", "weight loss", "muscle", "yoga", "meditation",
+        "doctor", "hospital", "clinic", "pharmacy", "medicine",
+        "symptom", "disease", "illness", "condition", "treatment",
+        "therapy", "surgery", "diagnosis", "prevention",
+        "vitamin", "supplement", "protein",
+        "mental health", "anxiety", "depression",
+        "sleep", "insomnia", "headache", "pain",
+        "pregnancy", "baby",
+    },
+    "academic": {
+        "paper", "research", "study", "academic", "preprint",
+        "publication", "scientific", "scholar", "doi",
+        "conference", "journal", "experiment", "methodology",
+        "benchmark", "dataset", "thesis", "dissertation",
+        "professor", "lecture", "curriculum",
+        "science", "mathematics", "physics", "chemistry", "biology",
+    },
+    "entertainment": {
+        "movie", "movies", "film", "films", "tv", "show", "shows",
+        "series", "episode", "episodes",
+        "music", "song", "songs", "album", "albums", "artist", "artists",
+        "band", "concert", "concerts",
+        "game", "games", "gaming", "video game", "playstation", "xbox", "nintendo",
+        "book", "books", "novel", "novels", "author", "authors",
+        "reading", "literature",
+        "anime", "manga", "comic", "comics", "cartoon", "cartoons",
+        "sport", "sports", "football", "soccer", "basketball", "tennis",
+        "celebrity", "celebrities", "actor", "actors", "actress", "actresses", "director",
+        "stream", "streaming", "netflix", "youtube", "spotify",
+        "funny", "joke", "jokes", "meme", "memes",
+        "watch", "listen", "walkthrough", "walkthroughs", "gameplay",
+        "review", "reviews", "rating", "ratings",
+    },
+    "news": {
+        "news", "breaking", "headline", "headlines", "report", "reports",
+        "coverage", "latest", "update", "updates", "announcement", "announcements",
+        "election", "policy", "government", "politics", "political",
+        "economy", "market", "markets", "stock", "stocks", "crypto", "bitcoin",
+        "war", "conflict", "protest", "protests", "scandal",
+    },
+}
+
+_STOPWORDS_SECTOR: frozenset[str] = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "can",
+    "was", "one", "our", "out", "get", "has", "him", "his", "how",
+    "its", "may", "new", "now", "old", "see", "two", "way", "who",
+    "did", "she", "use", "via", "that", "from", "have", "been",
+    "were", "said", "also", "they", "this", "what", "than",
+    "with", "their", "about", "into", "over", "after", "some",
+    "more", "most", "much", "many", "very", "just", "like",
+})
+
+
+def _classify_sector(query: str) -> str:
+    """Classify a query into a sector using keyword overlap scoring.
+
+    Returns one of: tech, food, travel, shopping, health, academic,
+    entertainment, news, general.
+    """
+    q_lower = query.lower()
+    tokens = {m.group() for m in re.finditer(r"[a-zA-Z]{3,}", q_lower)
+              if m.group() not in _STOPWORDS_SECTOR}
+
+    best_sector = "general"
+    best_score = 0
+
+    for sector, seeds in _SECTOR_SEEDS.items():
+        score = 0
+        for seed in seeds:
+            if " " in seed:
+                # Multi-word seed: substring match gives strong signal
+                if seed in q_lower:
+                    score += 3
+            else:
+                if seed in tokens:
+                    score += 1
+        if score > best_score:
+            best_score = score
+            best_sector = sector
+
+    # If no sector scored above a single keyword match, stay general
+    if best_score <= 0:
+        return "general"
+    return best_sector
+
+
+# Sector → relevant search provider functions.
+# Each sector only queries sources that make sense for its domain,
+# avoiding noise from irrelevant providers (e.g. HN for food queries).
+_SECTOR_PROVIDERS: dict[str, list] = {
+    "tech": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_hn_algolia, _search_github_api,
+        _search_reddit_api, _search_arxiv_api,
+    ],
+    "food": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_reddit_api, _search_wikipedia_api,
+        _search_nominatim,
+    ],
+    "travel": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_reddit_api, _search_wikipedia_api,
+        _search_nominatim,
+    ],
+    "shopping": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_reddit_api, _search_wikipedia_api,
+    ],
+    "health": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_reddit_api, _search_wikipedia_api,
+    ],
+    "academic": [
+        _search_arxiv_api, _search_wikipedia_api,
+        _search_duckduckgo_html, _search_via_jina_reader,
+    ],
+    "entertainment": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_reddit_api, _search_wikipedia_api,
+    ],
+    "news": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_hn_algolia,
+    ],
+    "general": [
+        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_reddit_api, _search_wikipedia_api,
+    ],
+}
+
+
+def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
+    """Search the web with sector-aware provider routing.
+
+    The query is classified into a sector (tech, food, travel, shopping,
+    health, academic, entertainment, news, or general), and only the
+    providers relevant to that sector are queried in parallel.  This
+    eliminates noise — HN/GitHub/arXiv are only queried for tech queries,
+    Nominatim (OpenStreetMap) only for food/travel queries, etc.
+
+    Results are **interleaved by source** for maximum diversity.
+
+    Returns a deduplicated list of up to ``max_results`` SearchResult items.
+    """
+    sector = _classify_sector(query)
+    providers = _SECTOR_PROVIDERS.get(sector, _SECTOR_PROVIDERS["general"])
+
+    # Collect results from all providers in parallel
+    all_items: list[SearchResult] = []
+    seen = set()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
+        futs = [pool.submit(p, query, max_results, timeout) for p in providers]
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                for item in fut.result():
+                    key = _canonical_url(item.url)
+                    if key and key not in seen:
+                        seen.add(key)
+                        all_items.append(item)
+            except Exception:
+                continue
+
+    # Interleave results by source for maximum diversity
+    by_source: dict[str, list[SearchResult]] = {}
+    for item in all_items:
+        src = item.source or "unknown"
+        by_source.setdefault(src, []).append(item)
+
+    interleaved: list[SearchResult] = []
+    while any(by_source.values()):
+        for src in list(by_source.keys()):
+            if by_source.get(src):
+                interleaved.append(by_source[src].pop(0))
+                if len(interleaved) >= max_results:
+                    return interleaved
+    return interleaved
+
+
 _SEARCH_PROVIDERS: dict[str, list] = {
     "duckduckgo": [_search_duckduckgo_html],
     "hackernews": [_search_hn_algolia],
     "arxiv": [_search_arxiv_api],
     "wikipedia": [_search_wikipedia_api],
-    "reddit": [_search_reddit_site],
+    "reddit": [_search_reddit_api, _search_reddit_site],
+    "github": [_search_github_api],
+    "nominatim": [_search_nominatim],
+    "twitter": [_search_twitter_site],
+    "xcom": [_search_twitter_site],
     "bing": [_search_via_jina_reader],
     "jina": [_search_jina_general],
-    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia],
+    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia, _search_reddit_api],
 }
 
 

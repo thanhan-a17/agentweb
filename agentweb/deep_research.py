@@ -144,13 +144,30 @@ class SemanticRouter:
             "what is", "who is", "where is", "also known as",
         },
         "reddit": {
-            "reddit", "subreddit", "opinion", "review",
-            "recommendation", "discussion", "advice",
-            "troubleshooting", "suggestion",
+            "reddit", "subreddit", "opinion", "opinions",
+            "review", "reviews", "recommendation", "recommendations",
+            "recommend", "discussion", "discussions", "advice",
+            "troubleshooting", "suggestion", "suggestions",
             "ama", "eli5", "tifu", "aita",
             "anyone else", "thoughts on", "what do you think",
             "does anyone", "has anyone", "experience with",
-            "worth it",
+            "worth it", "is it good", "should i buy",
+            "worth", "buy", "rating",
+        },
+        "twitter": {
+            "twitter", "xcom", "tweet", "announcement", "breaking",
+            "trending", "viral", "elon", "musk",
+            "just announced", "as of", "thread:",
+            "https://x.com/", "https://twitter.com/",
+            "whats happening", "latest news",
+        },
+        "github": {
+            "github", "repository", "repo", "open source",
+            "library", "framework", "tool", "package",
+            "implementation", "pypi", "npm", "crates",
+            "source code", "api wrapper", "cli tool",
+            "docker image", "plugin", "extension",
+            "github repo", "github project",
         },
     }
 
@@ -453,6 +470,8 @@ PROVIDER_TAGS: dict[str, list[str]] = {
     "wikipedia": ["factual", "background", "history", "definition", "overview"],
     "arxiv": ["research", "academic", "technical", "paper", "science", "algorithm"],
     "reddit": ["discussion", "opinion", "experience", "review", "comparison"],
+    "twitter": ["news", "announcement", "trending", "breaking", "realtime", "general"],
+    "github": ["technical", "tool", "library", "implementation", "open_source", "code"],
     "google": ["general", "news", "products", "factual"],
 }
 
