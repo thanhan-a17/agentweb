@@ -3,6 +3,7 @@
 __all__ = [
     "__version__",
     "AgentWeb",
+    "ContentAuthenticity",
     "fetch_url",
     "search_web",
     "search_by_provider",
@@ -14,6 +15,7 @@ __all__ = [
 ]
 __version__ = "0.1.7"
 
+from agentweb.authenticity import ContentAuthenticity
 from .core import (
     FetchResult,
     SearchResult,
