@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -39,6 +40,7 @@ def _emit(data, fmt: str, output: str | None = None) -> None:
         text = str(data)
     if output:
         path = Path(output).expanduser()
+        os.makedirs(path.parent, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         sys.stderr.write(f"\u2713 wrote {len(text)} bytes to {path}\n")
     else:
