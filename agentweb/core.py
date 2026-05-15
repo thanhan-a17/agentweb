@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from agentweb.errors import (
     map_exception,
 )
 from agentweb.authenticity import ContentAuthenticity
+from agentweb.safety import redact_secrets
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -47,6 +49,25 @@ USER_AGENTS = [
 ]
 
 TEXT_MIME_HINTS = ("text/", "application/json", "application/xml", "application/xhtml+xml")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# Default stopwords used across AgentWeb modules (sector classification, semantic routing, etc.)
+_DEFAULT_STOPWORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "can",
+    "was", "one", "our", "out", "get", "has", "him", "his", "how",
+    "its", "may", "new", "now", "old", "see", "two", "way", "who",
+    "did", "she", "use", "via", "that", "from", "have", "been",
+    "were", "said", "also", "they", "this", "what", "than",
+    "with", "their", "about", "into", "over", "after", "some",
+    "more", "most", "much", "many", "very", "just", "like",
+    "do", "it", "is", "be", "to", "of", "in", "on", "at",
+    "by", "as", "an", "or", "if", "so", "up", "no", "we",
+    "he", "she", "my", "me", "go", "am", "pm",
+})
 
 
 @dataclass
@@ -233,6 +254,42 @@ def _safe_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url if "://" in url else "https://" + url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise InvalidURL(f"Unsupported URL: {url}", url=url)
+
+    # SSRF protection: block requests to private/internal IP ranges
+    hostname = parsed.hostname
+    if hostname is None:
+        raise InvalidURL(f"URL has no resolvable hostname: {url}", url=url)
+
+    # Block known dangerous hostnames before DNS resolution
+    if hostname in ("0.0.0.0"):
+        raise InvalidURL(f"Blocked unspecified hostname: {hostname}", url=url)
+
+    try:
+        import ipaddress
+        import socket
+
+        # Resolve hostname to IP(s) for private-range checking
+        resolved_ips = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for family, _, _, _, sockaddr in resolved_ips:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+
+            # Allow loopback — legitimate for local dev servers and testing
+            if ip.is_loopback:
+                continue
+            if ip.is_private:
+                raise InvalidURL(f"Blocked private address: {ip_str}", url=url)
+            if ip.is_link_local:
+                raise InvalidURL(f"Blocked link-local address: {ip_str}", url=url)
+            if ip.is_unspecified:
+                raise InvalidURL(f"Blocked unspecified address: {ip_str}", url=url)
+            # Block AWS/GCP/Azure metadata endpoints
+            if ip_str == "169.254.169.254":
+                raise InvalidURL(f"Blocked cloud metadata endpoint: {ip_str}", url=url)
+    except (OSError, ValueError):
+        # DNS resolution failure — let the fetch pipeline handle it
+        pass
+
     return urllib.parse.urlunparse(parsed)
 
 
@@ -830,7 +887,7 @@ def fetch_url(
         response.encoding = response.encoding or response.apparent_encoding
         raw = response.text or ""
     except Exception as exc:
-        warnings.append(f"direct_http_failed:{type(exc).__name__}:{exc}")
+        warnings.append(f"direct_http_failed:{type(exc).__name__}")
 
     text = ""
     if raw:
@@ -877,6 +934,7 @@ def fetch_url(
                 authenticity = browser_auth
 
     result.text = text[:max_chars] if max_chars else text
+    result.text = redact_secrets(result.text)
     result.ok = bool(text) and not (result.status_code and result.status_code >= 500)
     result.source = tactics[-1] if tactics else "none"
     result.tactics = tactics
@@ -921,8 +979,6 @@ def fetch_url(
 
 def _fetch_jina(url: str, timeout: int = 20) -> FetchResult | None:
     reader_url = "https://r.jina.ai/http://" + re.sub(r"^https?://", "", url)
-    if url.startswith("https://"):
-        reader_url = "https://r.jina.ai/http://" + url[len("https://") :]
     try:
         resp = requests.get(reader_url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
         text = resp.text or ""
@@ -944,7 +1000,7 @@ def _fetch_jina(url: str, timeout: int = 20) -> FetchResult | None:
             tactics=["jina_reader"],
         )
     except Exception as exc:
-        return FetchResult(url=url, warnings=[f"jina_failed:{type(exc).__name__}:{exc}"])
+        return FetchResult(url=url, warnings=[f"jina_failed:{type(exc).__name__}"])
 
 
 def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
@@ -1053,7 +1109,7 @@ def research(
                 fetched.append(fut.result())
             except Exception as exc:
                 sr = fut_map[fut]
-                fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"fetch_failed:{exc}"]))
+                fetched.append(FetchResult(url=sr.url, title=sr.title, warnings=[f"fetch_failed:{type(exc).__name__}"]))
     fetched.sort(key=lambda r: r.quality_score(), reverse=True)
 
     # Apply exclude_sources on fetched results
@@ -1121,6 +1177,7 @@ def _canonical_url(url: str) -> str:
 
 def format_markdown_fetch(result: FetchResult, max_chars: int = 12000) -> str:
     data = result.to_dict(max_chars=max_chars)
+    data["text"] = redact_secrets(data["text"])
     parts = [f"# {data['title'] or data['final_url']}", ""]
     parts.append(f"URL: {data['final_url']}")
     parts.append(f"Status: {data['status_code']} | Source: {data['source']} | Quality: {data['quality_score']}")
@@ -1151,6 +1208,7 @@ def format_markdown_research(pack: dict[str, Any]) -> str:
         if src.get("warnings"):
             parts.append(f"Warnings: {', '.join(src['warnings'])}")
         text = src.get("text") or ""
+        text = redact_secrets(text)
         parts.append("\n" + text[:2500].strip())
 
 
@@ -1182,7 +1240,10 @@ def _search_arxiv_api(query: str, max_results: int, timeout: int) -> list[Search
             )
             if resp.status_code >= 400:
                 return []
-            root = ET.fromstring(resp.text)
+            # Use a custom parser that disables entity expansion to prevent XML bombs.
+            parser = ET.XMLParser(target=ET.TreeBuilder())
+            parser.entity = {}
+            root = ET.fromstring(resp.text, parser=parser)
             ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
             items: list[SearchResult] = []
             for entry in root.findall("a:entry", ns):
@@ -1640,16 +1701,6 @@ _SECTOR_SEEDS: dict[str, set[str]] = {
     },
 }
 
-_STOPWORDS_SECTOR: frozenset[str] = frozenset({
-    "the", "and", "for", "are", "but", "not", "you", "all", "can",
-    "was", "one", "our", "out", "get", "has", "him", "his", "how",
-    "its", "may", "new", "now", "old", "see", "two", "way", "who",
-    "did", "she", "use", "via", "that", "from", "have", "been",
-    "were", "said", "also", "they", "this", "what", "than",
-    "with", "their", "about", "into", "over", "after", "some",
-    "more", "most", "much", "many", "very", "just", "like",
-})
-
 
 def _classify_sector(query: str) -> str:
     """Classify a query into a sector using keyword overlap scoring.
@@ -1659,7 +1710,7 @@ def _classify_sector(query: str) -> str:
     """
     q_lower = query.lower()
     tokens = {m.group() for m in re.finditer(r"[a-zA-Z]{3,}", q_lower)
-              if m.group() not in _STOPWORDS_SECTOR}
+              if m.group() not in _DEFAULT_STOPWORDS}
 
     best_sector = "general"
     best_score = 0

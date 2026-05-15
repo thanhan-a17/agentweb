@@ -142,10 +142,8 @@ CLI · search · fetch · research · deep-research
 ### Advanced Features
 
 - **Auth profiles** — persistent browser sessions with cookie reuse. Login once, reuse across fetches.
-- **File ingestion** — ingest PDF, DOCX, HTML, CSV, JSON, TXT, MD into structured documents.
-- **Safety guards** — input validation, domain safety checks, secret redaction.
+- **Safety guards** — input validation, secret redaction on all output paths.
 - **Stealth browser** — Three preset levels (off/standard/aggressive). Canvas noise, WebGL spoofing, and more.
-- **Storage** — SQLite persistence for tasks, tool calls, and audit logs.
 
 ## License
 

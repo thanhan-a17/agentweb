@@ -16,5 +16,6 @@ dist/
 htmlcov/
 .env
 .hermes/
-test_deep_research.py
-agentweb-architecture.html
+.mypy_cache/
+.ruff_cache/
+*.log

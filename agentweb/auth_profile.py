@@ -12,22 +12,41 @@ import errno
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .stealth import stealth_script_for_level
+from agentweb.core import _now
 
 # ── Paths ───────────────────────────────────────────────────────────────
 
 AGENTWEB_CONFIG = Path.home() / ".config" / "agentweb"
 PROFILES_DIR = AGENTWEB_CONFIG / "auth-profiles"
+
+# ── Profile name validation ─────────────────────────────────────────────
+
+# Profile names must be 1–64 chars, start with alphanumeric,
+# and contain only alphanumerics, hyphens, and underscores.
+_PROFILE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+
+def _validate_profile_name(name: str) -> str:
+    """Validate a profile name against the allowed pattern.
+
+    Returns *name* unchanged on success.
+    Raises :class:`ValueError` for names that could be used for path
+    traversal or otherwise break file‑system expectations.
+    """
+    if not _PROFILE_NAME_RE.match(name):
+        raise ValueError(f"Invalid profile name: {name!r}")
+    return name
 
 # ── Fingerprint ─────────────────────────────────────────────────────────
 
@@ -49,7 +68,14 @@ _LOCK_FDS: dict[str, int] = {}
 
 
 def _profile_dir(name: str) -> Path:
-    return PROFILES_DIR / name
+    _validate_profile_name(name)
+    profile_dir = PROFILES_DIR / name
+    # Resolve symlinks and prevent path‑traversal escapes.
+    resolved = profile_dir.resolve()
+    resolved_base = PROFILES_DIR.resolve()
+    if not str(resolved).startswith(str(resolved_base) + os.sep) and str(resolved) != str(resolved_base):
+        raise ValueError(f"Profile path escapes base directory: {name!r}")
+    return profile_dir
 
 
 def _meta_path(name: str) -> Path:
@@ -72,10 +98,6 @@ class BrowserProfile:
     created_at: str = ""
     last_used: str = ""
     services: list[str] = field(default_factory=list)
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # ── Profile CRUD ────────────────────────────────────────────────────────
@@ -472,7 +494,7 @@ def open_browser(
 
     # Read any stderr to understand failure
     _release_lock(profile_name)
-    _stderr = proc.stderr.read() if proc.stderr else ""
+    _stderr = proc.stderr.read(4096) if proc.stderr else ""
     return {
         "status": "error",
         "profile": profile_name,

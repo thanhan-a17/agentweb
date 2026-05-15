@@ -7,8 +7,6 @@ structured error wrapping.
 
 from __future__ import annotations
 
-import email.utils
-import time
 from typing import Any, Iterator
 
 import requests
@@ -17,6 +15,7 @@ from agentweb import __version__
 from agentweb.core import (
     FetchResult,
     SearchResult,
+    _now,
     compute_novelty_scores,
     fetch_url,
     research as _research,
@@ -25,10 +24,13 @@ from agentweb.core import (
 )
 from agentweb.deep_research import _deep_research_stream
 from agentweb.errors import AgentWebError, NoResults, ValidationError, map_exception
+from agentweb.safety import InputGuard
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def _check_guard(guard_result) -> None:
+    """Raise ValidationError if the input guard check fails."""
+    if not guard_result.ok:
+        raise ValidationError(guard_result.message)
 
 
 def _build_meta(
@@ -167,6 +169,7 @@ class AgentWeb:
 
         Returns a dict with ``results``, ``query``, and ``meta``.
         """
+        _check_guard(InputGuard().validate_text(query))
         try:
             results: list[SearchResult] = search_web(
                 query,
@@ -215,6 +218,7 @@ class AgentWeb:
 
         Returns a dict with the fetch result fields plus ``meta``.
         """
+        _check_guard(InputGuard().validate_text(url))
         try:
             result: FetchResult = fetch_url(
                 url,
@@ -258,6 +262,7 @@ class AgentWeb:
         ``coverage_score``, ``knowledge_gaps``, ``suggested_followups``,
         and ``meta``.
         """
+        _check_guard(InputGuard().validate_text(query))
         try:
             pack = _research(
                 query,
