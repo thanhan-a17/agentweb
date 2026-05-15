@@ -1210,6 +1210,7 @@ def format_markdown_research(pack: dict[str, Any]) -> str:
         text = src.get("text") or ""
         text = redact_secrets(text)
         parts.append("\n" + text[:2500].strip())
+    return "\n".join(parts)
 
 
 # ═══════════════════════════════════════════════════════════════════
