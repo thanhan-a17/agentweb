@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentWeb Architecture Diagram</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'JetBrains Mono', monospace; background: #020617; min-height: 100vh; padding: 2rem; color: white; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container { background: rgba(15, 23, 42, 0.5); border-radius: 1rem; border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto; }
+    svg { width: 100%; min-width: 1000px; display: block; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem; border: 1px solid #1e293b; padding: 1.25rem; }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card-dot.orange { background: #fb923c; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>AgentWeb Architecture</h1>
+      </div>
+      <p class="subtitle">Web access CLI for AI agents — search, fetch, research, crawl, and source-pack</p>
+    </div>
+
+    <!-- Main Diagram -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 1060 760">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrowhead-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrowhead-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrowhead-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <marker id="arrowhead-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa" />
+          </marker>
+          <marker id="arrowhead-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- =================================================================
+             SYSTEM BOUNDARY
+             ================================================================= -->
+        <rect x="15" y="15" width="1030" height="730" rx="12" fill="rgba(251, 191, 36, 0.03)" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="8,4"/>
+        <text x="28" y="33" fill="#fbbf24" font-size="10" font-weight="600">AgentWeb System Boundary</text>
+
+        <!-- =================================================================
+             LEGEND (top-right)
+             ================================================================= -->
+        <text x="830" y="45" fill="white" font-size="11" font-weight="600">Legend</text>
+
+        <rect x="830" y="55" width="16" height="10" rx="2" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="852" y="63" fill="#94a3b8" font-size="8">CLI / API Layer</text>
+
+        <rect x="830" y="70" width="16" height="10" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="852" y="78" fill="#94a3b8" font-size="8">Core Engine</text>
+
+        <rect x="830" y="85" width="16" height="10" rx="2" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1"/>
+        <text x="852" y="93" fill="#94a3b8" font-size="8">Auth / Security</text>
+
+        <rect x="830" y="100" width="16" height="10" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="852" y="108" fill="#94a3b8" font-size="8">Persistence / SDK</text>
+
+        <rect x="830" y="115" width="16" height="10" rx="2" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1"/>
+        <text x="852" y="123" fill="#94a3b8" font-size="8">Message Bus / Sync</text>
+
+        <rect x="830" y="130" width="16" height="10" rx="2" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="852" y="138" fill="#94a3b8" font-size="8">External Systems</text>
+
+        <line x1="830" y1="150" x2="846" y2="150" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="852" y="153" fill="#94a3b8" font-size="8">Auth Flow</text>
+
+        <line x1="830" y1="163" x2="846" y2="163" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="3,3"/>
+        <text x="852" y="166" fill="#94a3b8" font-size="8">Data Flow</text>
+
+        <!-- =================================================================
+             ENTRY POINTS (External - Slate)
+             ================================================================= -->
+        <!-- User -->
+        <rect x="120" y="65" width="120" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="180" y="88" fill="white" font-size="12" font-weight="600" text-anchor="middle">👤 User</text>
+        <text x="180" y="106" fill="#94a3b8" font-size="9" text-anchor="middle">Terminal / Script</text>
+
+        <!-- AI Agent -->
+        <rect x="300" y="65" width="140" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="370" y="88" fill="white" font-size="12" font-weight="600" text-anchor="middle">🤖 AI Agent</text>
+        <text x="370" y="106" fill="#94a3b8" font-size="9" text-anchor="middle">Orchestrator</text>
+
+        <!-- HTTP Client -->
+        <rect x="500" y="65" width="140" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="570" y="88" fill="white" font-size="12" font-weight="600" text-anchor="middle">🌐 HTTP Client</text>
+        <text x="570" y="106" fill="#94a3b8" font-size="9" text-anchor="middle">curl / SDK / Service</text>
+
+        <!-- Arrows from entry points -->
+        <line x1="180" y1="120" x2="180" y2="145" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <line x1="370" y1="120" x2="370" y2="145" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <line x1="570" y1="120" x2="570" y2="145" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+
+        <!-- =================================================================
+             LAYER 1: CLI / API (Frontend - Cyan)
+             ================================================================= -->
+        <rect x="45" y="155" width="970" height="80" rx="8" fill="rgba(8, 51, 68, 0.15)" stroke="#22d3ee" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="55" y="170" fill="#22d3ee" font-size="10" font-weight="600">CLI / API Layer</text>
+
+        <!-- CLI -->
+        <rect x="75" y="180" width="150" height="45" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="150" y="198" fill="white" font-size="11" font-weight="600" text-anchor="middle">CLI (cli.py)</text>
+        <text x="150" y="214" fill="#94a3b8" font-size="9" text-anchor="middle">argparse → main()</text>
+
+        <!-- API Facade -->
+        <rect x="270" y="180" width="160" height="45" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="350" y="198" fill="white" font-size="11" font-weight="600" text-anchor="middle">API Facade (api.py)</text>
+        <text x="350" y="214" fill="#94a3b8" font-size="9" text-anchor="middle">REST: /v1/* → handle()</text>
+
+        <!-- Schema Validation -->
+        <rect x="480" y="180" width="180" height="45" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="570" y="198" fill="white" font-size="11" font-weight="600" text-anchor="middle">Schema Validation</text>
+        <text x="570" y="214" fill="#94a3b8" font-size="9" text-anchor="middle">JSON-Schema subset</text>
+
+        <!-- Format Emitters -->
+        <rect x="710" y="180" width="160" height="45" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="790" y="198" fill="white" font-size="11" font-weight="600" text-anchor="middle">Output Formatters</text>
+        <text x="790" y="214" fill="#94a3b8" font-size="9" text-anchor="middle">JSON / Markdown / Text</text>
+
+        <!-- CLI subcommands annotation -->
+        <text x="75" y="250" fill="#64748b" font-size="8">Commands: search · fetch · research · crawl · services · auth</text>
+
+        <!-- Arrow from CLI/API to Core -->
+        <line x1="350" y1="225" x2="350" y2="265" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <text x="362" y="250" fill="#94a3b8" font-size="8">dispatch</text>
+
+        <!-- =================================================================
+             LAYER 2: CORE ENGINE (Backend - Emerald)
+             ================================================================= -->
+        <rect x="45" y="275" width="970" height="180" rx="8" fill="rgba(6, 78, 59, 0.12)" stroke="#34d399" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="55" y="290" fill="#34d399" font-size="10" font-weight="600">Core Engine (core.py)</text>
+
+        <!-- Search Subsystem -->
+        <rect x="60" y="300" width="230" height="140" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.2"/>
+        <text x="175" y="318" fill="white" font-size="11" font-weight="600" text-anchor="middle">🔍 Search</text>
+        <text x="175" y="334" fill="#94a3b8" font-size="8" text-anchor="middle">14 providers · Parallel exec</text>
+        <text x="175" y="348" fill="#94a3b8" font-size="8" text-anchor="middle">Subject routing · Freshness</text>
+        <text x="175" y="362" fill="#94a3b8" font-size="8" text-anchor="middle">Relevance scoring · Balancing</text>
+        <text x="175" y="380" fill="#64748b" font-size="7" text-anchor="middle">DDG · Reddit · Wikipedia</text>
+        <text x="175" y="393" fill="#64748b" font-size="7" text-anchor="middle">arXiv · GitHub · HF · PubMed</text>
+        <text x="175" y="406" fill="#64748b" font-size="7" text-anchor="middle">OpenAlex · CrossRef · HN</text>
+        <text x="175" y="419" fill="#64748b" font-size="7" text-anchor="middle">StackOverflow · Bing · Wikidata</text>
+        <text x="175" y="432" fill="#64748b" font-size="7" text-anchor="middle">ClinicalTrials.gov</text>
+
+        <!-- Fetch Subsystem -->
+        <rect x="305" y="300" width="220" height="140" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.2"/>
+        <text x="415" y="318" fill="white" font-size="11" font-weight="600" text-anchor="middle">📄 Fetch</text>
+        <text x="415" y="334" fill="#94a3b8" font-size="8" text-anchor="middle">Layered Extraction Tactics</text>
+        <text x="415" y="348" fill="#94a3b8" font-size="8" text-anchor="middle">① Direct HTTP (requests)</text>
+        <text x="415" y="362" fill="#94a3b8" font-size="8" text-anchor="middle">② Jina Reader Fallback</text>
+        <text x="415" y="376" fill="#94a3b8" font-size="8" text-anchor="middle">③ Camoufox Browser</text>
+        <text x="415" y="390" fill="#94a3b8" font-size="8" text-anchor="middle">④ Agent Browser</text>
+        <text x="415" y="408" fill="#64748b" font-size="7" text-anchor="middle">Screenshot support</text>
+        <text x="415" y="422" fill="#64748b" font-size="7" text-anchor="middle">Next.js RSC payload extract</text>
+        <text x="415" y="436" fill="#64748b" font-size="7" text-anchor="middle">trafilatura markdown</text>
+
+        <!-- Research Subsystem -->
+        <rect x="540" y="300" width="220" height="140" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.2"/>
+        <text x="650" y="318" fill="white" font-size="11" font-weight="600" text-anchor="middle">🧪 Research</text>
+        <text x="650" y="334" fill="#94a3b8" font-size="8" text-anchor="middle">Search + Fetch Pipeline</text>
+        <text x="650" y="348" fill="#94a3b8" font-size="8" text-anchor="middle">① Search → rank sources</text>
+        <text x="650" y="362" fill="#94a3b8" font-size="8" text-anchor="middle">② Fetch top results</text>
+        <text x="650" y="376" fill="#94a3b8" font-size="8" text-anchor="middle">③ Quality scoring</text>
+        <text x="650" y="390" fill="#94a3b8" font-size="8" text-anchor="middle">④ Answer pack generation</text>
+        <text x="650" y="408" fill="#64748b" font-size="7" text-anchor="middle">Practical mode filter</text>
+        <text x="650" y="422" fill="#64748b" font-size="7" text-anchor="middle">Subject-aware routing</text>
+        <text x="650" y="436" fill="#64748b" font-size="7" text-anchor="middle">Evidence + gaps</text>
+
+        <!-- Crawl Subsystem -->
+        <rect x="775" y="300" width="220" height="140" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.2"/>
+        <text x="885" y="318" fill="white" font-size="11" font-weight="600" text-anchor="middle">🕷️ Crawl</text>
+        <text x="885" y="334" fill="#94a3b8" font-size="8" text-anchor="middle">BFS from seed URL</text>
+        <text x="885" y="348" fill="#94a3b8" font-size="8" text-anchor="middle">Content-area link extract</text>
+        <text x="885" y="362" fill="#94a3b8" font-size="8" text-anchor="middle">Nav/chrome link filtering</text>
+        <text x="885" y="376" fill="#94a3b8" font-size="8" text-anchor="middle">Depth + page limits</text>
+        <text x="885" y="390" fill="#94a3b8" font-size="8" text-anchor="middle">Answer pack output</text>
+        <text x="885" y="408" fill="#64748b" font-size="7" text-anchor="middle">Same-domain constraint</text>
+        <text x="885" y="422" fill="#64748b" font-size="7" text-anchor="middle">Include/exclude path regex</text>
+        <text x="885" y="436" fill="#64748b" font-size="7" text-anchor="middle">Link priority scoring</text>
+
+        <!-- Internal core flow arrows -->
+        <line x1="290" y1="370" x2="303" y2="370" stroke="#34d399" stroke-width="1" marker-end="url(#arrowhead-emerald)"/>
+        <line x1="525" y1="370" x2="538" y2="370" stroke="#34d399" stroke-width="1" marker-end="url(#arrowhead-emerald)"/>
+        <line x1="760" y1="370" x2="773" y2="370" stroke="#34d399" stroke-width="1" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- =================================================================
+             LAYER 3: AUTH PROFILES (Security - Rose)
+             ================================================================= -->
+        <rect x="45" y="475" width="440" height="115" rx="8" fill="rgba(136, 19, 55, 0.08)" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="55" y="491" fill="#fb7185" font-size="10" font-weight="600">Auth Profiles (auth_profile.py)</text>
+
+        <!-- Browser Profile -->
+        <rect x="60" y="500" width="190" height="78" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="155" y="520" fill="white" font-size="11" font-weight="600" text-anchor="middle">Camoufox Browser</text>
+        <text x="155" y="537" fill="#94a3b8" font-size="8" text-anchor="middle">Persistent user data dir</text>
+        <text x="155" y="552" fill="#94a3b8" font-size="8" text-anchor="middle">Non-headless sign-in</text>
+        <text x="155" y="567" fill="#64748b" font-size="7" text-anchor="middle">Cookie/session persistence</text>
+
+        <!-- Profile Manager -->
+        <rect x="270" y="500" width="200" height="78" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="370" y="520" fill="white" font-size="11" font-weight="600" text-anchor="middle">Profile Manager</text>
+        <text x="370" y="537" fill="#94a3b8" font-size="8" text-anchor="middle">File locking (fcntl)</text>
+        <text x="370" y="552" fill="#94a3b8" font-size="8" text-anchor="middle">Fingerprint verification</text>
+        <text x="370" y="567" fill="#64748b" font-size="7" text-anchor="middle">Profile CRUD · PID tracking</text>
+
+        <!-- Auth → Core flow -->
+        <path d="M 370 473 L 370 460 L 650 460 L 650 442" fill="none" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowhead-rose)"/>
+        <text x="510" y="454" fill="#fb7185" font-size="8">authenticated fetch / research</text>
+
+        <!-- =================================================================
+             NO LAYER 4 — LLM SYNTHESIS REMOVED
+             AgentWeb is zero external API dependencies.
+             ================================================================= -->
+
+        <!-- =================================================================
+             LAYER 5: PERSISTENCE & SDK (Violet - Database)
+             ================================================================= -->
+        <rect x="45" y="615" width="970" height="115" rx="8" fill="rgba(76, 29, 149, 0.08)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="55" y="631" fill="#a78bfa" font-size="10" font-weight="600">Persistence, Safety & SDK</text>
+
+        <!-- Storage -->
+        <rect x="60" y="640" width="150" height="78" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="135" y="658" fill="white" font-size="11" font-weight="600" text-anchor="middle">💾 Storage</text>
+        <text x="135" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">AgentWebStore</text>
+        <text x="135" y="691" fill="#64748b" font-size="7" text-anchor="middle">SQLite · Tasks · Audit</text>
+        <text x="135" y="705" fill="#64748b" font-size="7" text-anchor="middle">Tool calls · Config</text>
+
+        <!-- Orchestration -->
+        <rect x="230" y="640" width="150" height="78" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="305" y="658" fill="white" font-size="11" font-weight="600" text-anchor="middle">⚙️ Orchestration</text>
+        <text x="305" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">Plan · TaskStep · Execute</text>
+        <text x="305" y="691" fill="#64748b" font-size="7" text-anchor="middle">ConflictResolver</text>
+        <text x="305" y="705" fill="#64748b" font-size="7" text-anchor="middle">CollaborationMessages</text>
+
+        <!-- Mechanics -->
+        <rect x="400" y="640" width="150" height="78" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="475" y="658" fill="white" font-size="11" font-weight="600" text-anchor="middle">🧩 Mechanics</text>
+        <text x="475" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">AgentDefinition</text>
+        <text x="475" y="691" fill="#64748b" font-size="7" text-anchor="middle">ToolRegistry · ToolSpec</text>
+        <text x="475" y="705" fill="#64748b" font-size="7" text-anchor="middle">ExecutionPolicy</text>
+
+        <!-- Memory -->
+        <rect x="570" y="640" width="150" height="78" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="645" y="658" fill="white" font-size="11" font-weight="600" text-anchor="middle">🧠 Memory</text>
+        <text x="645" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">MemoryStore · Scope</text>
+        <text x="645" y="691" fill="#64748b" font-size="7" text-anchor="middle">RetrievalIndex</text>
+        <text x="645" y="705" fill="#64748b" font-size="7" text-anchor="middle">Injection filtering</text>
+
+        <!-- Safety -->
+        <rect x="740" y="640" width="130" height="78" rx="6" fill="rgba(136, 19, 55, 0.3)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="805" y="658" fill="white" font-size="11" font-weight="600" text-anchor="middle">🛡️ Safety</text>
+        <text x="805" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">InputGuard</text>
+        <text x="805" y="691" fill="#64748b" font-size="7" text-anchor="middle">SafetyPolicy</text>
+        <text x="805" y="705" fill="#64748b" font-size="7" text-anchor="middle">Secret Redaction</text>
+
+        <!-- Ingest -->
+        <rect x="890" y="640" width="110" height="78" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="945" y="658" fill="white" font-size="11" font-weight="600" text-anchor="middle">📥 Ingest</text>
+        <text x="945" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">FileIngestor</text>
+        <text x="945" y="691" fill="#64748b" font-size="7" text-anchor="middle">PDF · DOCX · HTML</text>
+        <text x="945" y="705" fill="#64748b" font-size="7" text-anchor="middle">CSV · JSON · TXT</text>
+
+        <!-- Flow from Core to Persistence/SDK -->
+        <path d="M 175 455 L 175 470 L 135 470 L 135 638" fill="none" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrowhead-violet)"/>
+        <path d="M 650 440 L 650 460 L 305 460 L 305 638" fill="none" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrowhead-violet)"/>
+        <path d="M 475 440 L 475 638" fill="none" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrowhead-violet)"/>
+        <path d="M 805 440 L 805 638" fill="none" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrowhead-rose)"/>
+
+        <!-- External search providers annotation -->
+        <text x="60" y="467" fill="#64748b" font-size="7">14 search providers → DuckDuckGo · Reddit · Wikipedia · arXiv · GitHub · HuggingFace · StackOverflow · HackerNews · Bing · OpenAlex · CrossRef · PubMed · ClinicalTrials · Wikidata</text>
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot cyan"></div>
+          <h3>Key Design Decisions</h3>
+        </div>
+        <ul>
+          <li>• No API keys required for search/fetch — zero-config baseline</li>
+          <li>• Layered extraction: HTTP → Jina → Camoufox → Agent Browser</li>
+          <li>• 14 parallel search providers with subject-aware routing</li>
+          <li>• Zero external API dependencies — no API keys required</li>
+          <li>• Persistent auth profiles via Camoufox (file-locked, fingerprinted)</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>Data Flow Pipeline</h3>
+        </div>
+        <ul>
+          <li>• <b>search</b> → parallel providers → rank + balance → enriched JSON/MD</li>
+          <li>• <b>fetch</b> → layered extraction → text/markdown/structured data</li>
+          <li>• <b>research</b> → search → fetch top → quality score → answer pack</li>
+          <li>• <b>crawl</b> → BFS seed → content-area links → answer pack</li>
+          <li>• All commands zero LLM — keyword-based evidence extraction</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>Deployment & Dependencies</h3>
+        </div>
+        <ul>
+          <li>• <b>Core:</b> requests ≥ 2.33 (zero optional deps for basic usage)</li>
+          <li>• <b>Browser:</b> camoufox + playwright (optional [browser] extra)</li>
+          <li>• <b>LLM:</b> None — zero external API dependencies</li>
+          <li>• <b>Extraction:</b> trafilatura (optional, richer markdown output)</li>
+          <li>• <b>Install:</b> uv tool install or pip, works on macOS/Linux</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <p class="footer">
+      AgentWeb v0.1.0 • 11 modules • 14 search providers • MIT License • Built for AI-native web access
+    </p>
+  </div>
+</body>
+</html>

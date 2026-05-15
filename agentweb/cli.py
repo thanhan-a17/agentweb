@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .core import FetchResult, format_markdown_fetch, format_markdown_research
+from .safety import InputGuard
 from .sdk import AgentWeb
 
 
@@ -21,6 +22,12 @@ def _headers(values: list[str] | None) -> dict[str, str]:
         k, v = value.split(":", 1)
         out[k.strip()] = v.strip()
     return out
+
+
+def _check_guard(guard_result) -> None:
+    """Raise SystemExit if the input guard check fails."""
+    if not guard_result.ok:
+        raise SystemExit(f"agentweb: {guard_result.code}: {guard_result.message}")
 
 
 def _parse_int_or_range(value: str) -> int:
@@ -96,8 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     aw = AgentWeb()
+    guard = InputGuard()
     try:
         if args.command == "search":
+            _check_guard(guard.validate_text(args.query))
             result = aw.search(args.query, max_results=args.max_results, timeout=args.timeout)
             results = result["results"]
             if args.format == "markdown":
@@ -113,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "fetch":
+            _check_guard(guard.validate_text(args.url))
             result = aw.fetch(
                 args.url,
                 timeout=args.timeout,
@@ -145,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result.get("ok") else 2
 
         if args.command == "research":
+            _check_guard(guard.validate_text(args.query))
             pack = aw.research(args.query, max_results=args.max_results, timeout=args.timeout, max_chars=args.max_chars)
             if args.format == "markdown":
                 _emit(format_markdown_research(pack), "text", args.output)
@@ -168,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        sys.stderr.write(f"agentweb: {type(exc).__name__}: {exc}\n")
+        sys.stderr.write(f"agentweb: {type(exc).__name__}\n")
         return 1
     return 1
 

@@ -31,6 +31,8 @@ class InputGuard:
     def validate_text(self, text: str) -> GuardResult:
         if not text or not text.strip():
             return GuardResult(False, "empty_input", "Enter some text before running this workflow.")
+        if "\x00" in text:
+            return GuardResult(False, "null_bytes", "Input contains null bytes.")
         if len(text) > self.max_text_chars:
             return GuardResult(False, "input_too_large", f"Input is too large; limit is {self.max_text_chars} characters.")
         return GuardResult(True, "ok", "ok")

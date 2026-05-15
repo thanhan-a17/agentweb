@@ -90,19 +90,7 @@ class StealthConfig:
     fake_ua: str = field(default_factory=_default_ua)
 
 
-def _default_ua_runner() -> str:
-    """Return a realistic Chrome UA string with randomized version."""
-    major = random.choice([124, 125, 126])
-    minor = random.randint(0, 9)
-    patch = random.randint(0, 99)
-    build = random.randint(1000, 9999)
-    rev = random.randint(100, 999)
-    return (
-        f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        f"AppleWebKit/537.36 (KHTML, like Gecko) "
-        f"Chrome/{major}.0.{minor}.{patch} "
-        f"Safari/537.36"
-    )
+
 
 
 # ── Preset Factory ───────────────────────────────────────────────────────────

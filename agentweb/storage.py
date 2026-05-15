@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from pathlib import Path
 from typing import Any
+
+from agentweb.core import _now
 
 SCHEMA_VERSION = 3
 
@@ -216,7 +217,3 @@ def _dump(value: Any) -> str:
 
 def _load(value: str) -> Any:
     return json.loads(value or "{}")
-
-
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

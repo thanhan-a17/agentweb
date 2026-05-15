@@ -64,6 +64,19 @@ _RE_FACTUAL = re.compile(
 # ── LaTeX / MathJax stripping ───────────────────────────────────────────────
 _RE_LATEX = re.compile(r'\$\$[^$]*\$\$|\$[^$\n]{1,200}\$')
 _RE_LATEX_FRAGMENT = re.compile(r'\$\$?\s*\d+(?:\s*\\times\s*\d+)?\s*\$\$?|\$\$')
+
+# Regex for broader stat detection (numbers, prices, percentages, scores)
+_RE_STAT = re.compile(
+    r"\b(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|million|billion|thousand|dollars?|usd|"
+    r"points?|score|rating|rank|users?|requests?)\b",
+    re.I,
+)
+_RE_PRICE = re.compile(r"\$\s*\d+(?:,\d{3})*(?:\.\d+)?")
+_RE_TABLE_ROW = re.compile(
+    r"^\|\s*.+\|.*$", re.MULTILINE
+)  # markdown table row
+_RE_NUMBER = re.compile(r"\b\d+(?:\.\d+)?\b")
+
 _RE_TECHNICAL_TERM = re.compile(
     r'\b(?:'
     r'(?-i:[A-Z]{2,}(?:-[A-Z]{2,})?(?:-[A-Za-z0-9]+)?)'  # Uppercase acronyms (case-sensitive)
@@ -911,7 +924,7 @@ def run_subagent(
                 all_results.extend(results)
             except Exception as exc:
                 if not any(f"provider_{provider}_error" in w for w in warnings):
-                    warnings.append(f"provider_{provider}_error:{exc}")
+                    warnings.append(f"provider_{provider}_error:{type(exc).__name__}")
 
     # ── Zero-result fallback chain ──────────────────────────────────────
     if not all_results:
@@ -923,7 +936,7 @@ def run_subagent(
                     all_results.extend(kw_results)
                     warnings.append(f"keyword_fallback:used '{keyword_q}'")
             except Exception as exc:
-                warnings.append(f"keyword_fallback_error:{exc}")
+                warnings.append(f"keyword_fallback_error:{type(exc).__name__}")
 
     if not all_results:
         try:
@@ -932,7 +945,7 @@ def run_subagent(
                 all_results.extend(jina_results)
                 warnings.append("jina_fallback:used Jina Search")
         except Exception as exc:
-            warnings.append(f"jina_fallback_error:{exc}")
+            warnings.append(f"jina_fallback_error:{type(exc).__name__}")
 
     if not all_results and sub_query.intent == "factual":
         min_keywords = _extract_keywords(sub_query.text)
@@ -945,7 +958,7 @@ def run_subagent(
                     all_results.extend(hn_results)
                     warnings.append(f"factual_short_fallback:used '{short_q}'")
             except Exception as exc:
-                warnings.append(f"factual_short_fallback_error:{exc}")
+                warnings.append(f"factual_short_fallback_error:{type(exc).__name__}")
 
     # 2. Deduplicate by canonical URL
     seen_urls: set[str] = set()
@@ -971,7 +984,7 @@ def run_subagent(
                 fetched.append(fut.result())
             except Exception as exc:
                 sr = fut_map[fut]
-                warnings.append(f"fetch_error:{sr.url[:50]}:{exc}")
+                warnings.append(f"fetch_error:{sr.url[:50]}:{type(exc).__name__}")
 
     # ── 3b. Reference/citation link following ─────────────────────────────
     # Extract all outbound links from fetched text that look like references
@@ -1068,6 +1081,7 @@ class ScoredSource:
     authority_boost: float
     coverage_boost: float
     total_score: float
+    novel_score: float = 1.0
 
 
 class BM25Scorer:
@@ -1347,19 +1361,6 @@ class EvidenceClaim:
     claim_type: str  # "fact" | "stat" | "date" | "entity" | "quote"
     relevance_score: float
     is_contradictory: bool = False  # set by contradiction detector
-
-
-# Regex for broader stat detection (numbers, prices, percentages, scores)
-_RE_STAT = re.compile(
-    r"\b(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|million|billion|thousand|dollars?|usd|"
-    r"points?|score|rating|rank|users?|requests?)\b",
-    re.I,
-)
-_RE_PRICE = re.compile(r"\$\s*\d+(?:,\d{3})*(?:\.\d+)?")
-_RE_TABLE_ROW = re.compile(
-    r"^\|\s*.+\|.*$", re.MULTILINE
-)  # markdown table row
-_RE_NUMBER = re.compile(r"\b\d+(?:\.\d+)?\b")
 
 
 def _strip_latex(text: str) -> str:
@@ -2154,7 +2155,7 @@ def _deep_research_stream(
                         fetched_results=[],
                         entity_facts=[],
                         coverage_score=0.0,
-                        warnings=[f"subagent_failed:{exc}"],
+                        warnings=[f"subagent_failed:{type(exc).__name__}"],
                     )
                 )
 
@@ -2333,7 +2334,7 @@ def deep_research(
                         fetched_results=[],
                         entity_facts=[],
                         coverage_score=0.0,
-                        warnings=[f"subagent_failed:{exc}"],
+                        warnings=[f"subagent_failed:{type(exc).__name__}"],
                     )
                 )
 
