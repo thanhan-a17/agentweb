@@ -378,11 +378,30 @@ def decompose_query(query: str) -> QueryPlan:
                         seen.add(key)
                         unique_entities.append(e)
                 if i == 0 and unique_entities:
-                    branch_q = f"{unique_entities[0]} deep research features how it works"
+                    # Entity-specific branch: preserve original query context
+                    entity = unique_entities[0]
+                    ctx = _simplify_query(query) or query
+                    ctx = re.sub(r'\b(compare|versus|vs\.?|or|and)\b', '', ctx, flags=re.I).strip()
+                    for other_entity in (e for e in unique_entities if e != entity):
+                        ctx = re.sub(r'\b' + re.escape(other_entity) + r'\b', '', ctx, flags=re.I).strip()
+                    ctx = re.sub(r'\s+', ' ', ctx).strip()
+                    branch_q = f"{entity} {ctx}" if ctx else f"{entity} deep research features how it works"
                 elif i == 1 and len(unique_entities) > 1:
-                    branch_q = f"{unique_entities[1]} deep research features how it works"
+                    entity = unique_entities[1]
+                    ctx = _simplify_query(query) or query
+                    ctx = re.sub(r'\b(compare|versus|vs\.?|or|and)\b', '', ctx, flags=re.I).strip()
+                    for other_entity in (e for e in unique_entities if e != entity):
+                        ctx = re.sub(r'\b' + re.escape(other_entity) + r'\b', '', ctx, flags=re.I).strip()
+                    ctx = re.sub(r'\s+', ' ', ctx).strip()
+                    branch_q = f"{entity} {ctx}" if ctx else f"{entity} deep research features how it works"
                 elif i == 2 and len(unique_entities) > 2:
-                    branch_q = f"{unique_entities[2]} deep research features how it works"
+                    entity = unique_entities[2]
+                    ctx = _simplify_query(query) or query
+                    ctx = re.sub(r'\b(compare|versus|vs\.?|or|and)\b', '', ctx, flags=re.I).strip()
+                    for other_entity in (e for e in unique_entities if e != entity):
+                        ctx = re.sub(r'\b' + re.escape(other_entity) + r'\b', '', ctx, flags=re.I).strip()
+                    ctx = re.sub(r'\s+', ' ', ctx).strip()
+                    branch_q = f"{entity} {ctx}" if ctx else f"{entity} deep research features how it works"
                 else:
                     # Remaining branches: cross-comparison and benchmarks
                     cross_suffixes = [
@@ -909,7 +928,9 @@ def run_subagent(
     seen_urls: set[str] = set()
     unique_results: list[SearchResult] = []
     for r in all_results:
-        url_key = r.url.split("?")[0].rstrip("/")
+        url_key = r.url.split("?")[0].rstrip("/").lower()
+        url_key = url_key.removeprefix("https://").removeprefix("http://")
+        url_key = url_key.removeprefix("www.")
         if url_key not in seen_urls:
             seen_urls.add(url_key)
             unique_results.append(r)
@@ -1793,6 +1814,10 @@ def build_report(
                 {
                     "title": s.result.title,
                     "url": s.result.final_url or s.result.url,
+                    "ok": s.result.ok,
+                    "status_code": s.result.status_code,
+                    "source": s.result.source,
+                    "text_len": len(s.result.text) if s.result.text else 0,
                     "quality_score": s.result.quality_score(),
                     "total_score": round(s.total_score, 3),
                     "bm25_score": round(s.bm25_score, 3),

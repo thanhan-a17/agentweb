@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.format == "markdown":
                 _emit(result["report_markdown"], "text", args.output)
             else:
-                _emit(result["report_json"], "json", args.output)
+                _emit(result, "json", args.output)
             return 0
     except KeyboardInterrupt:
         return 130
