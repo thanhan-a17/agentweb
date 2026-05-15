@@ -4,6 +4,24 @@
 
 Search, fetch, research, and deep-research the web — completely free, no keys required. Uses smart search + content extraction, not language models. Predictable, auditable, costs nothing to run.
 
+## One-Click Install (for AI agents)
+
+> Copy this whole block and paste it to your AI assistant (Claude, ChatGPT, Hermes, etc.). The agent will handle the rest.
+
+```
+Install AgentWeb — a CLI tool that lets AI agents search, fetch, research, and deep-research the web with no API keys and no AI costs.
+
+Requirements: Python 3.10+ and either `pip` or `uv` (preferred).
+
+Steps:
+1. Check if AgentWeb is already installed (`agentweb --version`).
+2. If not, install it:
+   - With uv (preferred): `uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'`
+   - Or with pip: `pip install git+https://github.com/thanhan-a17/agentweb.git`
+3. Verify installation by running `agentweb search "hello world" --format json` and confirming it returns results.
+4. Show me a quick summary of what's installed and that it works.
+```
+
 ## Installation
 
 ```bash
