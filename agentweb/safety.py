@@ -12,14 +12,6 @@ class GuardResult:
     code: str
     message: str
 
-
-@dataclass(frozen=True)
-class SafetyDecision:
-    domain: str
-    action: str
-    message: str
-
-
 class InputGuard:
     """Validate user text and uploads before expensive or risky processing."""
 
@@ -46,32 +38,6 @@ class InputGuard:
         return GuardResult(True, "ok", "ok")
 
 
-class SafetyPolicy:
-    """Subject-matter safety policy for high-risk domains."""
-
-    high_risk = {
-        "medical": ("insulin", "dose", "diagnose", "symptom", "therapy", "prescription", "clinical"),
-        "legal": ("lawsuit", "contract", "liability", "legal advice", "court", "statute"),
-        "financial": ("invest", "portfolio", "tax", "loan", "bankruptcy", "securities"),
-        "security": ("exfiltrate", "steal", "credential", "malware", "phishing", "exploit"),
-        "emergency": ("suicide", "overdose", "chest pain", "emergency", "bleeding"),
-    }
-
-    refusal_markers = ("exfiltrate", "steal", "malware", "phishing", "credential", "api keys")
-
-    def evaluate(self, text: str) -> SafetyDecision:
-        lower = text.lower()
-        domain = "general"
-        for candidate, markers in self.high_risk.items():
-            if any(marker in lower for marker in markers):
-                domain = candidate
-                break
-        if any(marker in lower for marker in self.refusal_markers):
-            return SafetyDecision(domain=domain, action="refuse", message="I can’t help with credential theft, exfiltration, malware, or abuse.")
-        if domain in {"medical", "legal", "financial", "emergency"}:
-            return SafetyDecision(domain=domain, action="defer_with_disclaimer", message=f"This is {domain} information, not professional advice. Use qualified help for decisions.")
-        return SafetyDecision(domain=domain, action="allow", message="ok")
-
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
@@ -88,14 +54,4 @@ def redact_secrets(text: str) -> str:
     return redacted
 
 
-def classify_output_claims(text: str) -> dict[str, str]:
-    lower = text.lower()
-    if any(marker in lower for marker in ("in my opinion", "i think", "prefer", "cleaner", "better")):
-        return {"claim_type": "opinion"}
-    if any(marker in lower for marker in ("speculate", "could", "might happen", "forecast")):
-        return {"claim_type": "speculative"}
-    if any(marker in lower for marker in ("might", "uncertain", "limited", "unknown", "not clear")):
-        return {"claim_type": "uncertain"}
-    if any(marker in lower for marker in ("according to", "source", "citation", "study", "evidence")):
-        return {"claim_type": "factual"}
-    return {"claim_type": "factual" if text.strip() else "uncertain"}
+

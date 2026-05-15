@@ -254,6 +254,42 @@ def _safe_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url if "://" in url else "https://" + url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise InvalidURL(f"Unsupported URL: {url}", url=url)
+
+    # SSRF protection: block requests to private/internal IP ranges
+    hostname = parsed.hostname
+    if hostname is None:
+        raise InvalidURL(f"URL has no resolvable hostname: {url}", url=url)
+
+    # Block known dangerous hostnames before DNS resolution
+    if hostname in ("0.0.0.0"):
+        raise InvalidURL(f"Blocked unspecified hostname: {hostname}", url=url)
+
+    try:
+        import ipaddress
+        import socket
+
+        # Resolve hostname to IP(s) for private-range checking
+        resolved_ips = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for family, _, _, _, sockaddr in resolved_ips:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+
+            # Allow loopback — legitimate for local dev servers and testing
+            if ip.is_loopback:
+                continue
+            if ip.is_private:
+                raise InvalidURL(f"Blocked private address: {ip_str}", url=url)
+            if ip.is_link_local:
+                raise InvalidURL(f"Blocked link-local address: {ip_str}", url=url)
+            if ip.is_unspecified:
+                raise InvalidURL(f"Blocked unspecified address: {ip_str}", url=url)
+            # Block AWS/GCP/Azure metadata endpoints
+            if ip_str == "169.254.169.254":
+                raise InvalidURL(f"Blocked cloud metadata endpoint: {ip_str}", url=url)
+    except (OSError, ValueError):
+        # DNS resolution failure — let the fetch pipeline handle it
+        pass
+
     return urllib.parse.urlunparse(parsed)
 
 

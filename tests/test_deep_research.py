@@ -7,7 +7,7 @@ import sys
 import time
 import os
 
-os.chdir("/Users/agent/projects/agentweb")
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 QUERIES = [
     {
