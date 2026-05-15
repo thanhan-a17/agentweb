@@ -6,7 +6,7 @@ Search, fetch, research, and deep-research the web — completely free, no keys 
 
 ## One-Click Install (for AI agents)
 
-> Copy this whole block and paste it to your AI assistant (Hermes Agent, OpenCode, Codex CLI, etc.). The agent will handle the rest.
+> Copy this whole block and paste it to your AI assistant (Hermes Agent, OpenClaw, Codex CLI, etc.). The agent will handle the rest.
 
 ```
 Install AgentWeb — a CLI tool that lets AI agents search, fetch, research, and deep-research the web with no API keys and no AI costs.
