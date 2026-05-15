@@ -62,7 +62,7 @@ All commands support `--format json` for agent consumption. Key fields:
 - **search**: `results[].{title, url, snippet, source}`
 - **fetch**: `{ok, status_code, text, title, links, quality_score, tactics, warnings}`
 - **research**: `{sources[].{text, ok, quality_score, warnings}, answer_pack.evidence[].{claim_or_evidence, source, title}}`
-- **deep-research**: `{executive_summary, key_findings, evidence, contradictions, knowledge_gaps, sources}`
+- **deep-research**: `{executive_summary, findings, evidence, contradictions, knowledge_gaps, sources}`
 
 ## Best practices
 
