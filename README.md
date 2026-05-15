@@ -1,8 +1,8 @@
 # AgentWeb
 
-**Web access for AI agents. Zero API keys. Zero LLM calls. Zero config.**
+**Web access for AI agents. No API keys. No AI bills. No setup.**
 
-Search, fetch, research, and deep-research the web — without a single API key or LLM token. Classical NLP only (BM25, TF-IDF, regex). Predictable, auditable, free.
+Search, fetch, research, and deep-research the web — completely free, no keys required. Uses smart search + content extraction, not language models. Predictable, auditable, costs nothing to run.
 
 ## Installation
 
@@ -14,7 +14,7 @@ pip install git+https://github.com/thanhan-a17/agentweb.git
 # or with uv
 uv tool install git+https://github.com/thanhan-a17/agentweb.git
 
-# with browser/crawl extras for JS-heavy sites with anti-detection
+# with browser/crawl extras for JS-heavy sites
 uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'
 ```
 
@@ -43,10 +43,10 @@ agentweb deep-research "transformer inference optimization" -o report.md
 
 | Command | What it does |
 |---|---|
-| `search` | Parallel search across 10+ providers — DuckDuckGo, HN, arXiv, Wikipedia, Reddit, GitHub, Stack Exchange, OpenStreetMap, Twitter/X, Jina. Sector-aware routing. |
-| `fetch` | Full page extraction with layered fallback: specialized extractors → HTTP → Jina Reader → Camoufox stealth browser. Auto-escalates on blocked content. |
-| `research` | Search + parallel fetch top sources → evidence pack with coverage score, knowledge gaps, answer sources, followup suggestions. |
-| `deep-research` | Multi-branch: query decomposition → parallel search/fetch → BM25 ranking → contradiction detection → structured report. No LLM. |
+| `search` | Searches across 10+ sources — DuckDuckGo, HN, arXiv, Wikipedia, Reddit, GitHub, and more. Automatically picks the best sources for your topic. |
+| `fetch` | Grabs full page content. Tries multiple methods — direct HTTP, Jina Reader, stealth browser — and picks whatever works. |
+| `research` | Searches then fetches the best results. Returns an evidence pack with scores, gaps, and follow-up ideas. |
+| `deep-research` | Breaks down your question, searches multiple angles, ranks findings, spots contradictions, and writes a structured report. No language model needed. |
 
 ### CLI Flags
 
@@ -59,7 +59,7 @@ agentweb deep-research "transformer inference optimization" -o report.md
 | `--cookies` | fetch | Cookie string or Netscape cookies.txt path |
 | `--header` | fetch | Extra request header (e.g. `Authorization: Bearer ***`) |
 | `--no-jina` | fetch | Disable Jina Reader fallback |
-| `--browser` | fetch | Try agent-browser snapshot fallback |
+| `--browser` | fetch | Try browser snapshot fallback |
 | `--refinement-loops` | deep-research | Iterative query refinement passes |
 
 ### Python SDK
@@ -101,13 +101,13 @@ tools = AgentWeb.openai_tools()
 
 ## Why
 
-**Made for agents, not humans.** Every command outputs structured JSON with quality scores, provenance, and tactics metadata — no HTML to parse, no ads to filter.
+**Built for AI agents, not humans.** Every command returns structured data with quality scores and source info — no HTML to scrape, no ads to filter.
 
-- **Zero API keys.** DuckDuckGo, HN Algolia, arXiv, Wikipedia, Reddit, GitHub, Stack Exchange, OpenStreetMap, Jina Reader — all free, zero-config.
-- **Zero LLM calls.** Classical NLP only (BM25, TF-IDF, regex, keyword scoring). Predictable, auditable, free. No model bills, no rate limits from AI providers.
-- **Layered fallback.** Specialized extractors → Direct HTTP → Jina Reader → Camoufox stealth browser. Auto-escalates based on content quality score — no domain lists to maintain.
-- **Sector-aware routing.** Automatically classifies queries (tech, health, academic, food, travel, shopping, entertainment, news) and routes to the most relevant search providers.
-- **Content authenticity scoring.** Real-time assessment of response quality (0.0–1.0) detecting CAPTCHAs, Cloudflare blocks, paywalls, and boilerplate — replaces hardcoded domain allow/block lists.
+- **No API keys.** DuckDuckGo, HN, arXiv, Wikipedia, Reddit, GitHub, Jina Reader — all free, just works.
+- **No AI costs.** No language models used anywhere. Predictable, auditable, $0 to run.
+- **Smart fallback.** If one method to fetch a page fails, it tries another. HTTP → Jina Reader → stealth browser, whatever it takes.
+- **Topic-aware routing.** Automatically figures out what kind of query it is (tech, health, academic, etc.) and picks the best sources.
+- **Content quality checks.** Detects CAPTCHAs, blocks, paywalls, and garbage — no need to maintain blocklists.
 
 ## Architecture
 
@@ -116,37 +116,37 @@ CLI · search · fetch · research · deep-research
   └─ SDK (AgentWeb class)
        └─ Core Engine
             ├─ Specialized extractors (Wikipedia, YouTube, arXiv, Reddit)
-            ├─ HTTP fetch with content authenticity scoring
+            ├─ HTTP fetch with quality scoring
             ├─ Jina Reader fallback
-            └─ Browser fallback (Camoufox stealth + auth profiles)
-  └─ Providers (10+ free, sector-routed)
+            └─ Browser fallback (stealth browser)
+  └─ Providers (10+ free, topic-routed)
        ├─ DuckDuckGo · HN Algolia · Jina + Bing
-       ├─ arXiv API · Wikipedia API · Reddit JSON
-       ├─ GitHub API · Stack Exchange API · OpenStreetMap Nominatim
+       ├─ arXiv · Wikipedia · Reddit
+       ├─ GitHub · Stack Exchange · OpenStreetMap
        └─ Twitter/X via DuckDuckGo + Jina
-  └─ deep-research pipeline (zero LLM)
-       ├─ Safety → Decompose → Route → Parallel Sub-agents
-       ├─ BM25 Rank → Evidence Extraction → Contradiction Detection
-       └─ Structured Report + Optional Refinement
+  └─ deep-research pipeline (no AI model)
+       ├─ Query decomposition → Routing → Parallel sub-agents
+       ├─ Ranking → Evidence extraction → Contradiction detection
+       └─ Structured report + optional refinement
 ```
 
 ## Design
 
-- **Zero external API deps** — no keys, no subscriptions, no LLM bills
-- **Content-first** — quality scoring replaces domain lists, auto-escalation based on what the server actually returns
-- **Layered extraction** — every fetch path escalates through 3+ tactics automatically
-- **Agent-native output** — JSON with quality scores, provenance, coverage metrics, knowledge gaps
-- **Classical NLP only** — predictable, auditable, free. No model calls anywhere in the pipeline
-- **Anti-detection** — 3 stealth levels (off/standard/aggressive), 15+ browser countermeasures, canvas noise, WebGL spoofing, timing jitter
+- **No API keys** — no subscriptions, no AI bills
+- **Content quality scoring** — replaces fragile domain allow/block lists
+- **Layered extraction** — every fetch tries multiple methods automatically
+- **Agent-native output** — JSON with quality scores, provenance, coverage
+- **No language models** — predictable, auditable, free
+- **Anti-detection** — stealth browser with canvas noise, WebGL spoofing, timing jitter
 
 ### Advanced Features
 
-- **Auth profiles** — persistent Camoufox browser sessions with cookie extraction. Login once, reuse cookies across fetches. `agentweb.auth_profile` module.
-- **File ingestion** — ingest PDF, DOCX, HTML, CSV, JSON, TXT, MD into structured documents. `FileIngestor` class.
-- **Safety guards** — input validation, domain safety policy (medical/legal/financial/security), secret redaction (API keys, tokens), output claim classification.
-- **Stealth browser** — Three preset levels (off/standard/aggressive). Canvas noise, WebGL spoofing, navigator property spoofing, plugin arrays, Chrome runtime objects, permission query spoofing, referrer spoofing, timing API jitter, CDP global cleanup.
-- **Storage** — SQLite persistence for tasks, tool calls, and audit logs via `AgentWebStore`.
+- **Auth profiles** — persistent browser sessions with cookie reuse. Login once, reuse across fetches.
+- **File ingestion** — ingest PDF, DOCX, HTML, CSV, JSON, TXT, MD into structured documents.
+- **Safety guards** — input validation, domain safety checks, secret redaction.
+- **Stealth browser** — Three preset levels (off/standard/aggressive). Canvas noise, WebGL spoofing, and more.
+- **Storage** — SQLite persistence for tasks, tool calls, and audit logs.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Built by [Nous Research](https://nousresearch.com).
+MIT — see [LICENSE](LICENSE).
