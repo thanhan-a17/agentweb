@@ -23,6 +23,7 @@ import hashlib
 import html
 import math
 import re
+import sys
 import time
 import urllib.parse
 import warnings
@@ -58,6 +59,25 @@ _RE_FACTUAL = re.compile(
     r"\b(what\s+is|what\s+are|who\s+is|who\s+was|when\s+did|where\s+is|"
     r"why\s+does|define|explain\s+how)\b",
     re.I,
+)
+
+# ── LaTeX / MathJax stripping ───────────────────────────────────────────────
+_RE_LATEX = re.compile(r'\$\$[^$]*\$\$|\$[^$\n]{1,200}\$')
+_RE_LATEX_FRAGMENT = re.compile(r'\$\$?\s*\d+(?:\s*\\times\s*\d+)?\s*\$\$?|\$\$')
+_RE_TECHNICAL_TERM = re.compile(
+    r'\b(?:'
+    r'(?-i:[A-Z]{2,}(?:-[A-Z]{2,})?(?:-[A-Za-z0-9]+)?)'  # Uppercase acronyms (case-sensitive)
+    r'|'
+    r'(?:vector|inference|accelerator|transformer|pooling|'
+    r'disaggregated|throughput|latency|bandwidth|'
+    r'kernel|compiler|runtime|encoder|decoder|tokenization|'
+    r'quantization|pruning|distillation|speculative|decoding|'
+    r'attention|sharding|parallelism|orchestration|scheduler|'
+    r'extensions|embeddings|normalization|backpropagation|'
+    r'fine-tuning|pretraining|autoencoder|autoregressive|'
+    r'convergence|optimization|allocation|virtualization|'
+    r'memory|pipeline|serving)'
+    r')\b', re.I
 )
 
 # ── Query normalization (strip question words, extract keywords) ────────────
@@ -347,7 +367,10 @@ def decompose_query(query: str) -> QueryPlan:
     signals += len(terms) >= 8  # long query = complex
     signals += intent in ("interrogative", "comparison", "list")
     signals += bool(_RE_YEAR.findall(query))  # temporal = specific
-    signals += 3 in [len(q) for q in q_words if len(q) > 5]  # multiple long words
+    signals += sum(1 for q in q_words if len(q) > 5) >= 3  # multiple long words
+    # Technical/acronym terms signal: count all-caps words, hyphenated-tech terms
+    tech_terms = _RE_TECHNICAL_TERM.findall(query)
+    signals += len(tech_terms) >= 3
     is_complex = signals >= 2
 
     # Comparison queries always benefit from multi-branch
@@ -1339,6 +1362,39 @@ _RE_TABLE_ROW = re.compile(
 _RE_NUMBER = re.compile(r"\b\d+(?:\.\d+)?\b")
 
 
+def _strip_latex(text: str) -> str:
+    """Remove LaTeX/MathJax artifacts from text."""
+    text = _RE_LATEX_FRAGMENT.sub(' ', text)
+    text = _RE_LATEX.sub(' ', text)
+    return text
+
+
+def _clean_claim_for_summary(sent: str) -> str:
+    """Clean a claim sentence for use in the executive summary.
+    
+    Strips: markdown links, LaTeX, raw URLs, breadcrumbs, ACL/journal metadata,
+    and sentences that are just author names + dates.
+    """
+    sent = _strip_latex(sent)
+    # Strip markdown link artifacts: [text](url) -> text
+    sent = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', sent)
+    # Strip raw URLs
+    sent = _RE_URL.sub(' ', sent)
+    # Strip breadcrumb patterns (word / word / word)
+    sent = re.sub(r'\b\w+\s*/\s*\w+(?:\s*/\s*\w+)+\b', ' ', sent)
+    # Strip ACL/journal metadata patterns
+    sent = re.sub(r'\b(Anthology ID|Volume|Year|ISBN|DOI|ISSN|Pages?|Published|Submitted|Accepted|Received|Revised|Published online|Conference|Proceedings|Journal|arXiv|preprint|Corpus ID):\s*\S+', ' ', sent, flags=re.I)
+    # Collapse multiple spaces
+    sent = _RE_WHITESPACE.sub(' ', sent).strip()
+    # Filter out sentences that are mostly author names + dates
+    if re.match(r'^[\s\w,.\-]+\s+\d{4}\s*$', sent) and len(sent) < 120:
+        return ''
+    # Filter out very short garbage after cleaning
+    if len(sent) < 30:
+        return ''
+    return sent
+
+
 def _is_nav_or_title_sentence(sent: str) -> bool:
     """Return True if sentence looks like a page title, nav label, or menu item."""
     low = sent.lower().strip()
@@ -1352,6 +1408,17 @@ def _is_nav_or_title_sentence(sent: str) -> bool:
         "skip to content", "menu", "subscribe", "sign in", "log in",
         "load more", "show more", "click here", "read more",
         "default order best", "value for money",
+        # Cookie consent / tracking / comment-system junk
+        "disqus", "cookie consent", "cookie policy", "cookie settings",
+        "cookiebot", "storage duration", "maximum storage", "html local storage",
+        "necessary for the functionality", "comment-system",
+        "aet-dismiss", "drafts.queue", "submitted_posts_cache",
+        "type: html", "type: http", "type: pixel",
+        "this website uses cookies", "we use cookies",
+        "by clicking accept", "accept all cookies",
+        "privacy policy", "terms of service",
+        "learn more about this provider", "opens in a new window",
+        "cookie",  # catch-all for any cookie mention
     ]
     for pat in nav_patterns:
         if pat in low:
@@ -1390,6 +1457,8 @@ def extract_evidence(
             continue
         for sent in _RE_SENTENCE_SPLIT.split(fr.text):
             sent = sent.strip()
+            # Strip LaTeX/MathJax artifacts before processing
+            sent = _strip_latex(sent)
             if len(sent) < 25 or len(sent) > 700:
                 continue
             # Deduplicate by sentence hash
@@ -1438,6 +1507,8 @@ def extract_evidence(
     all_sentences.sort(key=lambda x: x[2], reverse=True)
 
     claims: list[EvidenceClaim] = []
+    entity_count = 0
+    max_entity_claims = min(6, max_claims // 3)  # Max ~30% entity-type
     for sent, fr, relevance in all_sentences[:max_claims]:
         # Classify claim type — more aggressive stat detection
         if (re.search(r"\d+(?:\.\d+)?%", sent)
@@ -1447,7 +1518,24 @@ def extract_evidence(
         elif _RE_YEAR.search(sent):
             claim_type = "date"
         elif _RE_ENTITY_CAPTURE.findall(sent):
-            claim_type = "entity"
+            # Entity-type: apply minimum content threshold
+            has_verb = bool(re.search(r'\b(is|are|was|were|be|been|has|have|had|do|does|did'
+                                       r'|can|could|will|would|should|may|might|must'
+                                       r'|achieves?|provides?|enables?|supports?|offers?'
+                                       r'|delivers?|reduces?|improves?|increases?|decreases?'
+                                       r'|uses?|using|based|built|designed|developed'
+                                       r'|demonstrates?|shows?|reports?|found|claims?'
+                                       r'|outperforms?|exceeds?|matches?|achieves?)\b', sent, re.I))
+            has_numbers = bool(_RE_NUMBER.search(sent))
+            is_long_enough = len(sent) > 80
+            if has_verb or has_numbers or is_long_enough:
+                if entity_count < max_entity_claims:
+                    claim_type = "entity"
+                    entity_count += 1
+                else:
+                    continue  # skip this claim, entity cap reached
+            else:
+                continue  # bare entity mention, skip
         elif '"' in sent:
             claim_type = "quote"
         else:
@@ -1462,6 +1550,16 @@ def extract_evidence(
                 relevance_score=relevance,
             )
         )
+
+    # ── Source diversity enforcement: max 3 claims per source URL ──────
+    diversified: list[EvidenceClaim] = []
+    source_counts: dict[str, int] = {}
+    for c in claims:
+        key = c.source_url.split("?")[0].rstrip("/")
+        if source_counts.get(key, 0) < 3:
+            diversified.append(c)
+            source_counts[key] = source_counts.get(key, 0) + 1
+    claims = diversified
 
     return claims
 
@@ -1611,8 +1709,11 @@ def build_report(
         key = c.source_url.split("?")[0].rstrip("/")
         if key in seen_urls:
             continue
+        cleaned = _clean_claim_for_summary(c.sentence)
+        if not cleaned:
+            continue
         seen_urls.add(key)
-        exec_sents.append(c.sentence)
+        exec_sents.append(cleaned)
 
     exec_summary = " ".join(exec_sents) if exec_sents else "No substantive findings retrieved."
     if len(exec_summary) > 800:
@@ -1814,11 +1915,11 @@ def build_report(
                 {
                     "title": s.result.title,
                     "url": s.result.final_url or s.result.url,
+                    "quality_score": round(s.result.quality_score(), 1),
                     "ok": s.result.ok,
                     "status_code": s.result.status_code,
                     "source": s.result.source,
                     "text_len": len(s.result.text) if s.result.text else 0,
-                    "quality_score": s.result.quality_score(),
                     "total_score": round(s.total_score, 3),
                     "bm25_score": round(s.bm25_score, 3),
                     "authority_boost": s.authority_boost,
@@ -1831,8 +1932,11 @@ def build_report(
             ],
             "metadata": {
                 "total_sources_fetched": total_sources,
+                "sources_contributing": len(set(c.source_url for c in claims[:20])),
                 "average_coverage": round(avg_coverage, 3),
                 "contradictions_found": len(contradictions),
+                "contradictions_checked": True,
+                "contradictions_checked_among": len(claims),
                 "total_warnings": total_warnings,
             },
         },
@@ -1998,6 +2102,9 @@ def _deep_research_stream(
     # 1. Query decomposition
     plan = decompose_query(effective_query)
     providers = route_providers(effective_query, plan.intent)
+    branch_count = plan.branch_count
+    sys.stderr.write(f"Deep research: decomposed into {branch_count} branch(es) (intent: {plan.intent})\n")
+    sys.stderr.flush()
 
     # --- yield decompose phase ---
     yield {
@@ -2015,11 +2122,15 @@ def _deep_research_stream(
             pool.submit(run_subagent, sq, providers, timeout, max_chars): sq
             for sq in plan.sub_queries
         }
+        completed = 0
         for fut in concurrent.futures.as_completed(fut_map):
             sq = fut_map[fut]
             try:
                 sr: SubAgentResult = fut.result()
                 sub_results.append(sr)
+                completed += 1
+                sys.stderr.write(f"Deep research: branch {completed}/{branch_count} complete\n")
+                sys.stderr.flush()
 
                 # --- yield search results for this branch ---
                 yield {
@@ -2195,9 +2306,12 @@ def deep_research(
     # 1. Query decomposition
     plan = decompose_query(effective_query)
     providers = route_providers(effective_query, plan.intent)
+    branch_count = plan.branch_count
+    sys.stderr.write(f"Deep research: decomposed into {branch_count} branch(es) (intent: {plan.intent})\n")
+    sys.stderr.flush()
 
     # 2. Dispatch sub-agents in parallel (one per sub-query)
-    branch_count = plan.branch_count
+    completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=branch_count) as pool:
         fut_map = {
             pool.submit(run_subagent, sq, providers, timeout, max_chars): sq
@@ -2207,6 +2321,9 @@ def deep_research(
         for fut in concurrent.futures.as_completed(fut_map):
             try:
                 sub_results.append(fut.result())
+                completed += 1
+                sys.stderr.write(f"Deep research: branch {completed}/{branch_count} complete\n")
+                sys.stderr.flush()
             except Exception as exc:
                 sq = fut_map[fut]
                 sub_results.append(

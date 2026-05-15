@@ -15,3 +15,6 @@ dist/
 .coverage
 htmlcov/
 .env
+.hermes/
+test_deep_research.py
+agentweb-architecture.html

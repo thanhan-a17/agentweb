@@ -1165,34 +1165,64 @@ _RE_MULTISPACE = re.compile(r"\s+")
 
 def _search_arxiv_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     """Search arXiv API for academic papers. Returns SearchResult list."""
-    url = (
-        "http://export.arxiv.org/api/query?"
-        + urllib.parse.urlencode(
-            {"search_query": f"all:{query}", "start": 0, "max_results": min(max_results, 10)}
+    import requests as _requests
+
+    def _do_search(q: str) -> list[SearchResult]:
+        url = (
+            "http://export.arxiv.org/api/query?"
+            + urllib.parse.urlencode(
+                {"search_query": f"all:{q}", "start": 0, "max_results": min(max_results, 10)}
+            )
         )
-    )
-    try:
-        session = _get_default_session()
-        resp = session.get(url, timeout=timeout)
-        if resp.status_code >= 400:
+        try:
+            resp = _requests.get(
+                url,
+                timeout=timeout,
+                headers={"User-Agent": "AgentWeb/0.2 (mailto:agentweb@example.com)"},
+            )
+            if resp.status_code >= 400:
+                return []
+            root = ET.fromstring(resp.text)
+            ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+            items: list[SearchResult] = []
+            for entry in root.findall("a:entry", ns):
+                title_el = entry.find("a:title", ns)
+                title = _clean_text(_RE_ARXIV_CLEAN.sub("", (title_el.text or ""))) if title_el is not None else ""
+                id_el = entry.find("a:id", ns)
+                url_text = id_el.text.strip() if id_el is not None and id_el.text else ""
+                summary_el = entry.find("a:summary", ns)
+                summary = ""
+                if summary_el is not None and summary_el.text:
+                    summary = _clean_text(_RE_ARXIV_CLEAN.sub(" ", summary_el.text))[:300]
+                if title and url_text:
+                    items.append(SearchResult(title, url_text, summary, "arxiv"))
+            return items[:max_results]
+        except Exception:
             return []
-        root = ET.fromstring(resp.text)
-        ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
-        items: list[SearchResult] = []
-        for entry in root.findall("a:entry", ns):
-            title_el = entry.find("a:title", ns)
-            title = _clean_text(_RE_ARXIV_CLEAN.sub("", (title_el.text or ""))) if title_el is not None else ""
-            id_el = entry.find("a:id", ns)
-            url_text = id_el.text.strip() if id_el is not None and id_el.text else ""
-            summary_el = entry.find("a:summary", ns)
-            summary = ""
-            if summary_el is not None and summary_el.text:
-                summary = _clean_text(_RE_ARXIV_CLEAN.sub(" ", summary_el.text))[:300]
-            if title and url_text:
-                items.append(SearchResult(title, url_text, summary, "arxiv"))
-        return items[:max_results]
-    except Exception:
-        return []
+
+    # Primary search
+    items = _do_search(query)
+    if items:
+        return items
+
+    # Query simplification for long queries: try with fewer words
+    words = query.split()
+    if len(words) > 6:
+        # Try with first 3-4 significant words (skip short stopwords)
+        significant = [w for w in words if len(w) > 2]
+        if len(significant) > 4:
+            simplified = " ".join(significant[:4])
+            items = _do_search(simplified)
+            if items:
+                return items
+            # Fallback: try with even fewer
+            if len(significant) > 2:
+                simplified2 = " ".join(significant[:3])
+                items = _do_search(simplified2)
+                if items:
+                    return items
+
+    return []
 
 
 def _search_wikipedia_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
