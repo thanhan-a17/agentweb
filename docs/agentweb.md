@@ -5,12 +5,12 @@ AgentWeb is a CLI for AI agents that need web access. Four commands cover everyt
 ## Installation
 
 ```bash
-pip install agentweb
+pip install git+https://github.com/thanhan-a17/agentweb.git
 # or
-uv tool install agentweb
+uv tool install git+https://github.com/thanhan-a17/agentweb.git
 
 # With browser/crawl extras for JS-heavy sites:
-uv tool install 'agentweb[browser,crawl]'
+uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'
 ```
 
 ## Commands

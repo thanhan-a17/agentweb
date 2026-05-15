@@ -11,9 +11,7 @@ All notable changes to AgentWeb.
 - **Stealth browser subsystem** — three preset levels (off/standard/aggressive): navigator spoofing, canvas noise, WebGL spoofing, timing jitter, referrer spoofing.
 - **Auth profiles** — persistent browser sessions with cookie reuse via Camoufox.
 - **SDK facade** (`AgentWeb` class) — programmatic access with OpenAI-compatible tool schemas for agent integration.
-- **File ingestion** — PDF, DOCX, HTML, CSV, JSON, TXT, MD support with multi-tier extraction.
-- **Safety guards** — InputGuard input validation, secret redaction, domain safety policies.
-- **Storage** — SQLite persistence for tasks, tool calls, and audit logs.
+- **Safety guards** — InputGuard input validation, secret redaction.
 
 ### Changed
 - **No more domain config** — `config.py` deleted. Content authenticity scoring replaces static stealth domain lists.
@@ -25,7 +23,7 @@ All notable changes to AgentWeb.
 - **Source diversity scoring** — classifies sources into 10 types, boosts underrepresented, penalizes overrepresented.
 
 ### Fixed
-- **SSRF protection** — `_safe_url()` now blocks private, loopback, link-local, and cloud metadata IP addresses.
+- **SSRF protection** — `_safe_url()` now blocks private, link-local, and cloud metadata IP addresses (loopback allowed for dev/testing).
 - **Security audit** — 14 issues fixed (path traversal, XML bombs, secret leakage, exception sanitization, dead code removal, .gitignore hygiene, InputGuard wiring, forward references).
 - **Deep research quality** — 4 rounds of fixes (executive summary, entity extraction, evidence scoring, contradiction detection, coverage scoring, DDG fallback, quality score calibration, niche query decomposition).
 - **Bot-blocking after fallbacks** — content authenticity re-checked after all fetch tactics exhausted.
@@ -33,6 +31,7 @@ All notable changes to AgentWeb.
 - **Exception sanitization** — all warning/stderr output uses `{type(exc).__name__}`, never `{exc}`.
 
 ### Removed
+- `api.py`, `storage.py`, `ingest.py` — unreferenced dead code (~500 lines). Never wired into CLI or SDK.
 - `classify_output_claims()` — unreferenced dead code.
 - `SafetyPolicy` and `SafetyDecision` — unreferenced dead code.
 - `_default_ua_runner()` — unreferenced dead code.
