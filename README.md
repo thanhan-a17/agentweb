@@ -4,22 +4,25 @@
 
 Search, fetch, research, and deep-research the web — completely free, no keys required. Uses smart search + content extraction, not language models. Predictable, auditable, costs nothing to run.
 
+## ⚡ Quick Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash
+```
+
 ## One-Click Install (for AI agents)
 
-> Copy this whole block and paste it to your AI assistant (Hermes Agent, OpenClaw, Codex CLI, etc.). The agent will handle the rest.
+> Copy and paste to your AI assistant. The agent handles the rest.
 
 ```
-Install AgentWeb — a CLI tool that lets AI agents search, fetch, research, and deep-research the web with no API keys and no AI costs.
+Install AgentWeb.
 
-Requirements: Python 3.10+ and either `pip` or `uv` (preferred).
+Quickest: run `curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash`
 
-Steps:
-1. Check if AgentWeb is already installed (`agentweb --version`).
-2. If not, install it:
-   - With uv (preferred): `uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'`
-   - Or with pip: `pip install git+https://github.com/thanhan-a17/agentweb.git`
-3. Verify installation by running `agentweb search "Nous Research Hermes Agent 2026" --format json` and confirming it returns structured results with titles, URLs, and confidence scores.
-4. Show me a quick summary of what's installed and that it works.
+Manual: `uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
+Or: `pip install git+https://github.com/thanhan-a17/agentweb.git`
+
+Verify: `agentweb search "test" --format json`
 ```
 
 ## Installation
@@ -29,22 +32,49 @@ pip install git+https://github.com/thanhan-a17/agentweb.git
 ```
 
 ```bash
+# with browser/crawl extras for JS-heavy sites
+pip install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# with YouTube transcript support
+pip install 'agentweb[youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# all extras
+pip install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
+```
+
+```bash
 # or with uv
 uv tool install git+https://github.com/thanhan-a17/agentweb.git
 
 # with browser/crawl extras for JS-heavy sites
 uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# with YouTube transcript support (yt-dlp + youtube_transcript_api)
+uv tool install 'agentweb[youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# with all extras
+uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
 ```
 
 ```bash
 # from source
 git clone https://github.com/thanhan-a17/agentweb
 cd agentweb
-uv tool install '.[browser,crawl]'
+uv tool install '.[browser,crawl,youtube]'
 ```
 
 To upgrade:
 ```bash
+# Quickest — rerun the install script (upgrades uv + agentweb)
+curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash
+
+# Or manually:
+uv tool upgrade agentweb
+# (uv handles everything, including Python version)
+```
+
+```bash
+# via pip (requires Python 3.11+ already)
 pip install --upgrade git+https://github.com/thanhan-a17/agentweb.git
 ```
 
@@ -165,6 +195,7 @@ CLI · search · fetch · research · deep-research
 
 - **Auth profiles** — persistent browser sessions with cookie reuse. Login once, reuse across fetches.
 - **Safety guards** — input validation, secret redaction on all output paths.
+- **YouTube transcripts** — auto-detects YouTube URLs in fetch and extracts video transcripts via yt-dlp or youtube_transcript_api. No API key, no OAuth.
 - **Stealth browser** — Three preset levels (off/standard/aggressive). Canvas noise, WebGL spoofing, and more.
 
 ## License
