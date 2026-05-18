@@ -4,40 +4,25 @@
 
 Search, fetch, research, and deep-research the web — completely free, no keys required. Uses smart search + content extraction, not language models. Predictable, auditable, costs nothing to run.
 
-## ⚡ Quick Install (anyone)
-
-Paste this in your terminal — một câu lệnh duy nhất, tự động xử lý mọi thứ:
+## ⚡ Quick Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash
 ```
 
-Script tự làm hết: cài `uv` (nếu chưa có), tải Python đúng version, cài AgentWeb. Không cần biết Python, không cần cài gì trước.
-
----
-
 ## One-Click Install (for AI agents)
 
-> Copy this whole block and paste it to your AI assistant (Hermes Agent, OpenClaw, Codex CLI, etc.). The agent will handle the rest.
+> Copy and paste to your AI assistant. The agent handles the rest.
 
 ```
-Install AgentWeb — a CLI tool that lets AI agents search, fetch, research, and deep-research the web with no API keys and no AI costs.
+Install AgentWeb.
 
-Requirements: Python 3.11+ and either `pip` or `uv` (preferred).
+Quickest: run `curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash`
 
-Quickest way (handles everything automatically):
-Run `curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash`
-This installs uv if missing, downloads the right Python, and installs AgentWeb with all extras.
+Manual: `uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
+Or: `pip install git+https://github.com/thanhan-a17/agentweb.git`
 
-Steps (manual):
-1. Check if AgentWeb is already installed (`agentweb --version`).
-2. If not, install it:
-   - With uv (recommended — auto-handles Python version): `uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
-   - Or with pip: `pip install git+https://github.com/thanhan-a17/agentweb.git`
-   - With extras (JS-heavy sites): `pip install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'`
-   - With YouTube transcripts: `pip install 'agentweb[youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
-3. Verify installation by running `agentweb search "Nous Research Hermes Agent 2026" --format json` and confirming it returns structured results with titles, URLs, and confidence scores.
-4. Show me a quick summary of what's installed and that it works.
+Verify: `agentweb search "test" --format json`
 ```
 
 ## Installation
