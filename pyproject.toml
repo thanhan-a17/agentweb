@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentweb"
-version = "0.2.0"
+version = "0.2.1"
 description = "Zero-API-key web access CLI for AI agents: search, fetch, extract, and source-pack."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "requests>=2.33.0,<3",
+    "requests>=2.32.0,<3",
 ]
 
 [project.optional-dependencies]
