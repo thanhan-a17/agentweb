@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "agentweb"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "requests" },
@@ -27,7 +27,7 @@ requires-dist = [
     { name = "camoufox", marker = "extra == 'browser'" },
     { name = "playwright", marker = "extra == 'browser'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
-    { name = "requests", specifier = ">=2.33.0,<3" },
+    { name = "requests", specifier = ">=2.32.0,<3" },
     { name = "trafilatura", marker = "extra == 'crawl'", specifier = ">=2.0" },
 ]
 provides-extras = ["dev", "browser", "crawl"]
