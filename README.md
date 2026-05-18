@@ -4,6 +4,18 @@
 
 Search, fetch, research, and deep-research the web — completely free, no keys required. Uses smart search + content extraction, not language models. Predictable, auditable, costs nothing to run.
 
+## ⚡ Quick Install (anyone)
+
+Paste this in your terminal — một câu lệnh duy nhất, tự động xử lý mọi thứ:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash
+```
+
+Script tự làm hết: cài `uv` (nếu chưa có), tải Python đúng version, cài AgentWeb. Không cần biết Python, không cần cài gì trước.
+
+---
+
 ## One-Click Install (for AI agents)
 
 > Copy this whole block and paste it to your AI assistant (Hermes Agent, OpenClaw, Codex CLI, etc.). The agent will handle the rest.
@@ -13,10 +25,14 @@ Install AgentWeb — a CLI tool that lets AI agents search, fetch, research, and
 
 Requirements: Python 3.11+ and either `pip` or `uv` (preferred).
 
-Steps:
+Quickest way (handles everything automatically):
+Run `curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash`
+This installs uv if missing, downloads the right Python, and installs AgentWeb with all extras.
+
+Steps (manual):
 1. Check if AgentWeb is already installed (`agentweb --version`).
 2. If not, install it:
-   - With uv (preferred): `uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
+   - With uv (recommended — auto-handles Python version): `uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
    - Or with pip: `pip install git+https://github.com/thanhan-a17/agentweb.git`
    - With extras (JS-heavy sites): `pip install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'`
    - With YouTube transcripts: `pip install 'agentweb[youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
@@ -64,6 +80,16 @@ uv tool install '.[browser,crawl,youtube]'
 
 To upgrade:
 ```bash
+# Quickest — rerun the install script (upgrades uv + agentweb)
+curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash
+
+# Or manually:
+uv tool upgrade agentweb
+# (uv handles everything, including Python version)
+```
+
+```bash
+# via pip (requires Python 3.11+ already)
 pip install --upgrade git+https://github.com/thanhan-a17/agentweb.git
 ```
 
