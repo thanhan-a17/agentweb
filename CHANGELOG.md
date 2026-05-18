@@ -2,6 +2,32 @@
 
 All notable changes to AgentWeb.
 
+## [0.3.0] — 2026-05-18
+
+### Added
+- **YouTube search provider** — searches YouTube via DuckDuckGo `site:` operator + Jina Reader fallback. No API key needed. Added to tech, food, travel, health, academic, entertainment, and general sector routes.
+- **Bot-block detection** — runtime scanning for CAPTCHA walls, Cloudflare challenges, Jina error wrappers, and "blocked by network security" messages. Results with bot content are marked `ok=false` and excluded from analysis.
+- **Quality filtering in `research()`** — sources below `quality_score >= 3.0` are filtered out before building answer packs. Coverage metrics now reflect only quality-passed sources. New `coverage` block exposes `requested/fetched/quality_passed` counts.
+- **Reddit relevance filtering** — blocks known pump subreddits (IBRX, Livimmune, DRTS_Stock), requires minimum score > 1, enforces 15% query-term overlap for relevance. Applied to both JSON API and Jina-based Reddit results.
+- **Comparison query decomposition in deep-research** — `"A vs B"` queries now get 5 specialized branches (entity1, entity2, direct comparison, pros/cons, alternatives) with entity extraction and context isolation.
+- **Source URL propagation through evidence pipeline** — entity, stat, date, and table claims now carry `source_url` for full traceability back to the originating page.
+- **Quality gate in deep-research `rank_sources()`** — drops results with `quality_score < 3.0` before ranking, adds `quality_filtered:N` warning to metadata.
+- **Claim-type diversity in executive summary** — max 2 claims of the same type, max 5 total. Prevents summary from being dominated by a single angle.
+- **Source diversity metric** in deep-research metadata — `unique_domains / total_fetched` ratio.
+- **Capping controls** — `max_sources=30` and `max_findings=30` (previously hardcoded at 15/20). Exposed in metadata for auditability.
+- **Stress test suite** (`stress_test.py`) — automated quality validation for search, research, and deep-research with pass/fail metrics.
+
+### Changed
+- **DuckDuckGo HTML parser** — multiple fallback selectors for result blocks, title/link extraction, and snippet parsing. Snippet fallback uses title when no snippet found.
+- **Twitter search** — Jina Reader is now the primary fallback (was direct fetch).
+- **Stricter quality scoring** — bot-block penalty increased to -3.0 (from -2.0), non-ok results get -3.0 instead of 0, pages under 200 chars get -2.0. `to_dict()` now includes `text_len` field.
+- **Evidence extraction** — max claims increased from 20 to 30, returns `candidates_count` for pipeline transparency. Structured facts (table rows, key-value pairs) now merged without a hard cap — `build_report()` handles the final limiting.
+- **Executive summary** — expanded from 3 to 5 sentences with claim-type diversity enforcement.
+
+### Fixed
+- **Source URL handling in evidence** — table/key-value facts now carry the correct `source_url` and `source_title` instead of empty strings. Source diversity key deduplication uses robust `split("?")[0]` stripping.
+- **DDG result block parsing** — fallback to any result-class div when primary selector fails (DDG markup changes frequently).
+
 ## [0.2.0] — 2026-05-15
 
 ### Added

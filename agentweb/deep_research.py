@@ -32,6 +32,7 @@ from typing import Any, Iterable, NamedTuple
 
 # AgentWeb's own imports
 from agentweb.core import fetch_url, search_by_provider, search_web, FetchResult, SearchResult, compute_novelty_scores
+from agentweb.authenticity import ContentAuthenticity
 from agentweb.safety import InputGuard
 
 # ─── Shared regexes ──────────────────────────────────────────────────────────
@@ -394,89 +395,108 @@ def decompose_query(query: str) -> QueryPlan:
     sub_queries: list[SubQuery] = []
 
     if is_complex:
-        # Strategy: decompose into 3–5 parallel sub-branches
-        branch_count = 3 if intent == "factual" else 5
-        for i in range(branch_count):
-            branch_intent = ["factual", "background", "current_status", "details", "examples"][
-                i
-            ]
-            weight = 1.0 / branch_count
+        branch_count = 5
+        weight = 1.0 / branch_count
 
-            if intent == "comparison":
-                # Comparison queries: split into per-side branches
-                # Extract named entities (products/platforms) from the query
-                entities = _RE_ENTITY_CAPTURE.findall(query)
-                unique_entities = []
-                seen = set()
-                for e in entities:
-                    key = e.lower()
-                    if key not in seen and len(key) > 2:
-                        seen.add(key)
-                        unique_entities.append(e)
-                if i == 0 and unique_entities:
-                    # Entity-specific branch: preserve original query context
-                    entity = unique_entities[0]
-                    ctx = _simplify_query(query) or query
-                    ctx = re.sub(r'\b(compare|versus|vs\.?|or|and)\b', '', ctx, flags=re.I).strip()
-                    for other_entity in (e for e in unique_entities if e != entity):
-                        ctx = re.sub(r'\b' + re.escape(other_entity) + r'\b', '', ctx, flags=re.I).strip()
-                    ctx = re.sub(r'\s+', ' ', ctx).strip()
-                    branch_q = f"{entity} {ctx}" if ctx else f"{entity} deep research features how it works"
-                elif i == 1 and len(unique_entities) > 1:
-                    entity = unique_entities[1]
-                    ctx = _simplify_query(query) or query
-                    ctx = re.sub(r'\b(compare|versus|vs\.?|or|and)\b', '', ctx, flags=re.I).strip()
-                    for other_entity in (e for e in unique_entities if e != entity):
-                        ctx = re.sub(r'\b' + re.escape(other_entity) + r'\b', '', ctx, flags=re.I).strip()
-                    ctx = re.sub(r'\s+', ' ', ctx).strip()
-                    branch_q = f"{entity} {ctx}" if ctx else f"{entity} deep research features how it works"
-                elif i == 2 and len(unique_entities) > 2:
-                    entity = unique_entities[2]
-                    ctx = _simplify_query(query) or query
-                    ctx = re.sub(r'\b(compare|versus|vs\.?|or|and)\b', '', ctx, flags=re.I).strip()
-                    for other_entity in (e for e in unique_entities if e != entity):
-                        ctx = re.sub(r'\b' + re.escape(other_entity) + r'\b', '', ctx, flags=re.I).strip()
-                    ctx = re.sub(r'\s+', ' ', ctx).strip()
-                    branch_q = f"{entity} {ctx}" if ctx else f"{entity} deep research features how it works"
-                else:
-                    # Remaining branches: cross-comparison and benchmarks
-                    cross_suffixes = [
-                        "comparison benchmarks performance accuracy",
-                        "pricing availability free paid",
-                        "use cases best for when to use",
-                    ]
-                    branch_q = f"{simplified or query} {cross_suffixes[i % len(cross_suffixes)]}"
-            elif i == 0:
-                # Branch 0: core definition / primary answer
-                branch_q = simplified or query
-            elif i == 1:
-                # Branch 1: background / history / context
-                if intent == "factual":
-                    branch_q = f"{simplified or query} history background origin"
-                elif intent == "list":
-                    branch_q = f"{simplified or query} overview categories types"
-                else:
-                    branch_q = f"{simplified or query} background context overview"
-            elif i == 2:
-                # Branch 2: current state / recent developments
-                branch_q = f"{simplified or query} 2024 2025 2026 current recent latest"
-            elif i == 3:
-                # Branch 3: specific details / edge cases
-                branch_q = f"{simplified or query} details examples use cases"
+        if intent == "comparison":
+            # Extract named entities (products/platforms) from the query
+            entities = _RE_ENTITY_CAPTURE.findall(query)
+            unique_entities = []
+            seen = set()
+            for e in entities:
+                key = e.lower()
+                if key not in seen and len(key) > 2:
+                    seen.add(key)
+                    unique_entities.append(e)
+
+            if len(unique_entities) >= 2:
+                ent1, ent2 = unique_entities[0], unique_entities[1]
+                ctx = _simplify_query(query) or query
+                ctx = re.sub(r'\b(compare|versus|vs\.?|or|and)\b', '', ctx, flags=re.I).strip()
+                ctx = re.sub(r'\s+', ' ', ctx).strip()
+
+                branches = [
+                    (query, "original"),
+                    (f"{ent1} {ctx}" if ctx else f"{ent1} overview features", "entity1_focused"),
+                    (f"{ent2} {ctx}" if ctx else f"{ent2} overview features", "entity2_focused"),
+                    (f"{ent1} vs {ent2} comparison review benchmarks", "direct_comparison"),
+                    (f"{ent1} vs {ent2} pros cons alternatives", "pros_cons"),
+                ]
+                for i, (text, b_intent) in enumerate(branches):
+                    branch_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(text)}
+                    sub_queries.append(
+                        SubQuery(
+                            id=f"q{i}",
+                            text=text,
+                            intent=b_intent,
+                            weight=weight,
+                            parent_terms=terms & branch_terms,
+                        )
+                    )
             else:
-                # Branch 4: related topics / broader context
-                branch_q = f"{simplified or query} related topics compared alternative"
+                # Fallback when entities aren't clearly detected
+                branches = [
+                    (query, "original"),
+                    (f"{simplified or query} comparison review", "direct_comparison"),
+                    (f"{simplified or query} pros cons", "pros_cons"),
+                    (f"{simplified or query} alternatives", "alternatives"),
+                    (f"{simplified or query} benchmarks performance", "benchmarks"),
+                ]
+                for i, (text, b_intent) in enumerate(branches):
+                    branch_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(text)}
+                    sub_queries.append(
+                        SubQuery(
+                            id=f"q{i}",
+                            text=text,
+                            intent=b_intent,
+                            weight=weight,
+                            parent_terms=terms & branch_terms,
+                        )
+                    )
+        else:
+            # Non-comparison queries: use keyword extraction for branches
+            kw_list = keywords.split() if keywords else (simplified or query).split()
+            filler = {
+                "history", "background", "origin", "details", "examples",
+                "use", "cases", "related", "topics", "compared", "alternative",
+                "current", "recent", "latest", "overview", "categories", "types",
+            }
+            core_kws = [w for w in kw_list if w.lower() not in filler and len(w) > 2]
 
-            branch_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(branch_q)}
-            sub_queries.append(
-                SubQuery(
-                    id=f"q{i}",
-                    text=branch_q,
-                    intent=branch_intent,
-                    weight=weight,
-                    parent_terms=terms & branch_terms,
+            branch_specs = [
+                (simplified or query, "original"),
+                ("history background origin", "background"),
+                ("current recent latest 2025 2026", "current_status"),
+                ("details examples use cases", "details"),
+                ("related topics alternatives compared", "alternatives"),
+            ]
+
+            for i, (suffix, b_intent) in enumerate(branch_specs):
+                if i == 0:
+                    text = suffix
+                else:
+                    if core_kws:
+                        subset_size = max(2, len(core_kws) // 2)
+                        start = (i - 1) % max(1, len(core_kws))
+                        subset = core_kws[start:start + subset_size]
+                        if not subset:
+                            subset = core_kws[:subset_size]
+                        text = f"{' '.join(subset)} {suffix}"
+                    else:
+                        text = f"{simplified or query} {suffix}"
+                    # Ensure no branch is identical to the original
+                    if text == (simplified or query) or text == query:
+                        text = f"{simplified or query} {suffix}"
+                branch_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(text)}
+                sub_queries.append(
+                    SubQuery(
+                        id=f"q{i}",
+                        text=text,
+                        intent=b_intent,
+                        weight=weight,
+                        parent_terms=terms & branch_terms,
+                    )
                 )
-            )
     else:
         # Simple query: one branch with query expansion
         expansion_suffixes = []
@@ -599,7 +619,7 @@ class SubAgentResult:
     warnings: list[str]
 
 
-def _extract_entities(text: str) -> list[dict]:
+def _extract_entities(text: str, source_url: str = "") -> list[dict]:
     """
     Extract named entities and structured facts without LLM.
     Uses regex patterns + capitalization heuristics + numeric extraction + table parsing.
@@ -616,21 +636,21 @@ def _extract_entities(text: str) -> list[dict]:
             "they",
             "there",
         }:
-            facts.append({"type": "entity", "value": phrase, "context": text[max(0, match.start() - 40) : match.end() + 40]})
+            facts.append({"type": "entity", "value": phrase, "context": text[max(0, match.start() - 40) : match.end() + 40], "source_url": source_url})
 
     # Extract years/dates
     for match in _RE_YEAR.finditer(text):
         ctx_start = max(0, match.start() - 30)
         ctx_end = min(len(text), match.end() + 30)
-        facts.append({"type": "date", "value": match.group(), "context": text[ctx_start:ctx_end]})
+        facts.append({"type": "date", "value": match.group(), "context": text[ctx_start:ctx_end], "source_url": source_url})
 
     # Extract numbers with units
     for match in _RE_STAT.finditer(text):
-        facts.append({"type": "stat", "value": match.group(), "context": text[max(0, match.start() - 20) : min(len(text), match.end() + 20)]})
+        facts.append({"type": "stat", "value": match.group(), "context": text[max(0, match.start() - 20) : min(len(text), match.end() + 20)], "source_url": source_url})
 
     # Extract currency values ($X, $X.XX)
     for match in _RE_PRICE.finditer(text):
-        facts.append({"type": "stat", "value": match.group(), "context": text[max(0, match.start() - 20) : min(len(text), match.end() + 20)]})
+        facts.append({"type": "stat", "value": match.group(), "context": text[max(0, match.start() - 20) : min(len(text), match.end() + 20)], "source_url": source_url})
 
     # Extract markdown table rows (pipe-delimited) — each row is a structured fact
     # The first row is the header; subsequent rows contain data
@@ -660,6 +680,7 @@ def _extract_entities(text: str) -> list[dict]:
                                     "value": cell,
                                     "field": key,
                                     "context": f"{key}: {cell}",
+                                    "source_url": source_url,
                                 })
         else:
             in_table = False
@@ -677,6 +698,7 @@ def _extract_entities(text: str) -> list[dict]:
                     "value": val,
                     "field": key,
                     "context": f"{key}: {val}",
+                    "source_url": source_url,
                 })
 
     return facts
@@ -1056,7 +1078,7 @@ def run_subagent(
     all_facts: list[dict] = []
     for r in all_fetched:
         if r.text:
-            all_facts.extend(_extract_entities(r.text))
+            all_facts.extend(_extract_entities(r.text, source_url=r.final_url or r.url))
 
     coverage = _coverage_score(sub_query, all_fetched)
 
@@ -1293,11 +1315,21 @@ def rank_sources(
     Formula: total = 0.3 * bm25 + 0.2 * authority + 0.2 * coverage + 0.2 * diversity + 0.1 * freshness
     """
     all_fetched: list[tuple[FetchResult, float, SubAgentResult]] = []
+    dropped_low_quality = 0
     for sub_result in results:
         for fr in sub_result.fetched_results:
             if not fr.text:
                 continue
+            # Deep-research quality gate: same threshold as research()
+            if not fr.ok or fr.quality_score() < 3.0:
+                dropped_low_quality += 1
+                continue
             all_fetched.append((fr, sub_result.coverage_score, sub_result))
+
+    if dropped_low_quality:
+        # Propagate warning to first sub_result for metadata visibility
+        if results:
+            results[0].warnings.append(f"quality_filtered:{dropped_low_quality}")
 
     if not all_fetched:
         return []
@@ -1431,8 +1463,8 @@ def extract_evidence(
     scored_sources: list[ScoredSource],
     query: str,
     intent: str,
-    max_claims: int = 20,
-) -> list[EvidenceClaim]:
+    max_claims: int = 30,
+) -> tuple[list[EvidenceClaim], int]:
     """
     Extractive summarization without LLM:
     1. Score every sentence in every source using BM25 overlap with query
@@ -1440,6 +1472,8 @@ def extract_evidence(
     3. Boost sentences with entities, statistics, dates
     4. Penalize short/nav/title sentences
     5. Select top-N by composite score
+
+    Returns (claims, candidates_count).
     """
     q_terms = {t.lower() for t in _RE_TERM_TOKEN.findall(query)}
     intent_terms = {"factual": ["report", "found", "discovered", "announced", "revealed"],
@@ -1552,17 +1586,20 @@ def extract_evidence(
             )
         )
 
-    # ── Source diversity enforcement: max 3 claims per source URL ──────
+    # ── Source diversity enforcement: max 3 claims per source URL ───────
     diversified: list[EvidenceClaim] = []
     source_counts: dict[str, int] = {}
     for c in claims:
-        key = c.source_url.split("?")[0].rstrip("/")
+        key = c.source_url.split("?")[0].rstrip("/") if c.source_url else ""
+        if not key:
+            diversified.append(c)
+            continue
         if source_counts.get(key, 0) < 3:
             diversified.append(c)
             source_counts[key] = source_counts.get(key, 0) + 1
     claims = diversified
 
-    return claims
+    return claims, len(all_sentences)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1679,6 +1716,10 @@ def build_report(
     scored_sources: list[ScoredSource],
     claims: list[EvidenceClaim],
     contradictions: list[tuple[EvidenceClaim, EvidenceClaim]],
+    *,
+    max_sources: int = 30,
+    max_findings: int = 30,
+    candidates_count: int = 0,
 ) -> dict[str, Any]:
     """
     Build the final research report without any LLM.
@@ -1688,7 +1729,7 @@ def build_report(
     3. Evidence (all claims with citations)
     4. Contradictions (flagged conflicts)
     5. Sources (full source list ranked)
-    6. Research Metadata (plan, effort, coverage)
+    6. Research Metadata (plan, effort, coverage, capping)
     """
 
     template = INTENT_TEMPLATES.get(plan.intent, INTENT_TEMPLATES["general"])
@@ -1701,22 +1742,30 @@ def build_report(
     if not exec_candidates:
         exec_candidates = claims[:5]
 
-    # Pick up to 3 sentences, preferring stat types and diversity of sources
+    # Pick up to 5 sentences, preferring stat types and diversity of sources + claim types
     exec_sents = []
     seen_urls = set()
+    seen_types = set()
     for c in exec_candidates:
-        if len(exec_sents) >= 3:
+        if len(exec_sents) >= 5:
             break
-        key = c.source_url.split("?")[0].rstrip("/")
-        if key in seen_urls:
+        key = c.source_url.split("?")[0].rstrip("/") if c.source_url else ""
+        if key and key in seen_urls:
             continue
+        # Enforce claim-type diversity: max 2 of same type
+        if c.claim_type in seen_types:
+            type_count = sum(1 for s in exec_sents if s[1] == c.claim_type)
+            if type_count >= 2:
+                continue
         cleaned = _clean_claim_for_summary(c.sentence)
         if not cleaned:
             continue
-        seen_urls.add(key)
-        exec_sents.append(cleaned)
+        if key:
+            seen_urls.add(key)
+        seen_types.add(c.claim_type)
+        exec_sents.append((cleaned, c.claim_type))
 
-    exec_summary = " ".join(exec_sents) if exec_sents else "No substantive findings retrieved."
+    exec_summary = " ".join(s[0] for s in exec_sents) if exec_sents else "No substantive findings retrieved."
     if len(exec_summary) > 800:
         exec_summary = exec_summary[:797].rsplit(" ", 1)[0] + "..."
 
@@ -1833,7 +1882,7 @@ def build_report(
 
     # ── 5. Sources ────────────────────────────────────────────────────────
     source_lines = ["## Sources\n"]
-    for i, scored in enumerate(scored_sources[:15], 1):
+    for i, scored in enumerate(scored_sources[:max_sources], 1):
         fr = scored.result
         source_lines.append(
             f"{i}. [{fr.title}]({fr.final_url or fr.url})  \n"
@@ -1842,10 +1891,22 @@ def build_report(
             f"Authority: {scored.authority_boost:.1f}x\n"
         )
 
-    # ── 6. Metadata ───────────────────────────────────────────────────────
+    # ── 6. Metadata ────────────────────────────────────────────────────────
     total_sources = sum(len(sr.fetched_results) for sr in sub_results)
     total_warnings = sum(len(sr.warnings) for sr in sub_results)
     avg_coverage = sum(sr.coverage_score for sr in sub_results) / len(sub_results) if sub_results else 0
+
+    # Source diversity: unique domains among fetched results
+    domains = set()
+    for sr in sub_results:
+        for fr in sr.fetched_results:
+            try:
+                domain = fr.final_url or fr.url
+                domain = domain.split("/")[2].split(":")[0] if "//" in domain else domain.split("/")[0].split(":")[0]
+                domains.add(domain)
+            except Exception:
+                pass
+    source_diversity = len(domains) / max(1, total_sources)
 
     metadata_lines = [
         "## Research Metadata\n",
@@ -1856,6 +1917,9 @@ def build_report(
         f"- **Average coverage**: {avg_coverage:.0%}\n",
         f"- **Contradictions found**: {len(contradictions)}\n",
         f"- **Fetch warnings**: {total_warnings}\n",
+        f"- **Source diversity**: {len(domains)} unique domains / {total_sources} fetched ({source_diversity:.0%})\n",
+        f"- **Evidence candidates**: {candidates_count} sentences scored, top {len(claims[:max_findings])} presented\n",
+        f"- **Capping**: max_sources={max_sources}, max_findings={max_findings}\n",
     ]
 
     # ── Assemble final report ────────────────────────────────────────────
@@ -1901,7 +1965,7 @@ def build_report(
                     "relevance": round(c.relevance_score, 3),
                     "contradiction": c.is_contradictory,
                 }
-                for c in claims[:20]
+                for c in claims[:max_findings]
             ],
             "contradictions": [
                 {
@@ -1921,6 +1985,8 @@ def build_report(
                     "status_code": s.result.status_code,
                     "source": s.result.source,
                     "text_len": len(s.result.text) if s.result.text else 0,
+                    "tactics": s.result.tactics,
+                    "warnings": s.result.warnings,
                     "total_score": round(s.total_score, 3),
                     "bm25_score": round(s.bm25_score, 3),
                     "authority_boost": s.authority_boost,
@@ -1929,16 +1995,31 @@ def build_report(
                         "already_known" if getattr(s, 'novel_score', 1.0) < 0.3 else ""
                     ),
                 }
-                for s in scored_sources[:15]
+                for s in scored_sources[:max_sources]
             ],
             "metadata": {
                 "total_sources_fetched": total_sources,
-                "sources_contributing": len(set(c.source_url for c in claims[:20])),
+                "sources_contributing": len(set(c.source_url for c in claims[:max_findings])),
                 "average_coverage": round(avg_coverage, 3),
                 "contradictions_found": len(contradictions),
                 "contradictions_checked": True,
                 "contradictions_checked_among": len(claims),
                 "total_warnings": total_warnings,
+                "source_diversity": {
+                    "unique_domains": len(domains),
+                    "total_fetched": total_sources,
+                    "ratio": round(source_diversity, 3),
+                },
+                "evidence_pipeline": {
+                    "candidates_scored": candidates_count,
+                    "findings_presented": len(claims[:max_findings]),
+                },
+                "capping": {
+                    "max_sources": max_sources,
+                    "max_findings": max_findings,
+                    "findings_presented": len(claims[:max_findings]),
+                    "sources_presented": len(scored_sources[:max_sources]),
+                },
             },
         },
     }
@@ -2202,7 +2283,7 @@ def _deep_research_stream(
     }
 
     # 5. Extract evidence
-    claims = extract_evidence(scored_sources, effective_query, plan.intent, max_claims=20)
+    claims, candidates_count = extract_evidence(scored_sources, effective_query, plan.intent, max_claims=30)
 
     # 5b. Add structured facts from table/key-value extraction
     table_claims: list[EvidenceClaim] = []
@@ -2214,16 +2295,23 @@ def _deep_research_stream(
                 h = hashlib.md5(key.lower().encode()).hexdigest()[:12]
                 if h not in seen_table_keys:
                     seen_table_keys.add(h)
+                    src_url = fact.get("source_url", "")
+                    # Look up source title from fetched_results
+                    src_title = ""
+                    for fr in sr.fetched_results:
+                        if fr.final_url == src_url or fr.url == src_url:
+                            src_title = fr.title
+                            break
                     table_claims.append(EvidenceClaim(
                         sentence=fact.get("context", fact["value"]),
-                        source_url="",
-                        source_title="",
+                        source_url=src_url,
+                        source_title=src_title,
                         claim_type="stat" if re.search(r"\d", fact["value"]) else "fact",
                         relevance_score=0.5,
                     ))
-    # Merge with sentence-level claims, keeping top-N by relevance
+    # Merge with sentence-level claims, keeping top-N by relevance (no hard cap here; build_report handles it)
     all_claims = sorted(claims + table_claims, key=lambda c: c.relevance_score, reverse=True)
-    claims = all_claims[:20]
+    claims = all_claims
 
     # --- yield evidence phase ---
     yield {
@@ -2244,7 +2332,7 @@ def _deep_research_stream(
     contradictions = detect_contradictions(claims)
 
     # 7. Build report
-    report = build_report(effective_query, plan, sub_results, scored_sources, claims, contradictions)
+    report = build_report(effective_query, plan, sub_results, scored_sources, claims, contradictions, candidates_count=candidates_count)
 
     elapsed = time.time() - start_time
 
@@ -2363,7 +2451,7 @@ def deep_research(
             s.novel_score = 1.0  # default
 
     # 5. Extract evidence
-    claims = extract_evidence(scored_sources, effective_query, plan.intent, max_claims=20)
+    claims, candidates_count = extract_evidence(scored_sources, effective_query, plan.intent, max_claims=30)
 
     # 5b. Add structured facts from table/key-value extraction
     table_claims: list[EvidenceClaim] = []
@@ -2375,22 +2463,29 @@ def deep_research(
                 h = hashlib.md5(key.lower().encode()).hexdigest()[:12]
                 if h not in seen_table_keys:
                     seen_table_keys.add(h)
+                    src_url = fact.get("source_url", "")
+                    # Look up source title from fetched_results
+                    src_title = ""
+                    for fr in sr.fetched_results:
+                        if fr.final_url == src_url or fr.url == src_url:
+                            src_title = fr.title
+                            break
                     table_claims.append(EvidenceClaim(
                         sentence=fact.get("context", fact["value"]),
-                        source_url="",
-                        source_title="",
+                        source_url=src_url,
+                        source_title=src_title,
                         claim_type="stat" if re.search(r"\d", fact["value"]) else "fact",
                         relevance_score=0.5,
                     ))
-    # Merge with sentence-level claims, keeping top-N by relevance
+    # Merge with sentence-level claims, keeping top-N by relevance (no hard cap here; build_report handles it)
     all_claims = sorted(claims + table_claims, key=lambda c: c.relevance_score, reverse=True)
-    claims = all_claims[:20]
+    claims = all_claims
 
     # 6. Detect contradictions
     contradictions = detect_contradictions(claims)
 
     # 7. Build report
-    report = build_report(effective_query, plan, sub_results, scored_sources, claims, contradictions)
+    report = build_report(effective_query, plan, sub_results, scored_sources, claims, contradictions, candidates_count=candidates_count)
 
     elapsed = time.time() - start_time
 

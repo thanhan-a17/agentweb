@@ -61,7 +61,7 @@ agentweb deep-research "transformer inference optimization" -o report.md
 
 | Command | What it does |
 |---|---|
-| `search` | Searches across 10+ sources — DuckDuckGo, HN, arXiv, Wikipedia, Reddit, GitHub, and more. Automatically picks the best sources for your topic. |
+| `search` | Searches across 10+ sources — DuckDuckGo, HN, arXiv, Wikipedia, Reddit, GitHub, YouTube, and more. Automatically picks the best sources for your topic. |
 | `fetch` | Grabs full page content. Tries multiple methods — direct HTTP, Jina Reader, stealth browser — and picks whatever works. |
 | `research` | Searches then fetches the best results. Returns an evidence pack with scores, gaps, and follow-up ideas. |
 | `deep-research` | Breaks down your question, searches multiple angles, ranks findings, spots contradictions, and writes a structured report. No language model needed. |
@@ -79,6 +79,7 @@ agentweb deep-research "transformer inference optimization" -o report.md
 | `--no-jina` | fetch | Disable Jina Reader fallback |
 | `--browser` | fetch | Try browser snapshot fallback |
 | `--refinement-loops` | deep-research | Iterative query refinement passes |
+| `--provider` | search | Restrict to specific provider (e.g. `youtube`, `reddit`, `github`) |
 
 ### Python SDK
 
@@ -121,11 +122,12 @@ tools = AgentWeb.openai_tools()
 
 **Built for AI agents, not humans.** Every command returns structured data with quality scores and source info — no HTML to scrape, no ads to filter.
 
-- **No API keys.** DuckDuckGo, HN, arXiv, Wikipedia, Reddit, GitHub, Jina Reader — all free, just works.
+- **No API keys.** DuckDuckGo, HN, arXiv, Wikipedia, Reddit, GitHub, Jina Reader, YouTube — all free, just works.
 - **No AI costs.** No language models used anywhere. Predictable, auditable, $0 to run.
-- **Smart fallback.** If one method to fetch a page fails, it tries another. HTTP → Jina Reader → stealth browser, whatever it takes.
-- **Topic-aware routing.** Automatically figures out what kind of query it is (tech, health, academic, etc.) and picks the best sources.
-- **Content quality checks.** Detects CAPTCHAs, blocks, paywalls, and garbage — no need to maintain blocklists.
+- **Bot-block detection.** Automatically detects CAPTCHAs, Cloudflare challenges, Jina errors, and network blocks — marks them as failed so agents don't act on garbage.
+- **Quality filtering.** Research output automatically filters sources below quality threshold (score < 3.0). Deep research applies the same gate before ranking.
+- **Reddit relevance filtering.** Blocks pump subreddits enforces score and query-term overlap minimums. No more getting IBRX stock pump results when you asked about Python.
+- **Comparison-aware deep research.** Queries like "A vs B" get 5 specialized branches — per-entity deep dives, direct comparison, pros/cons, and alternatives.
 
 ## Architecture
 
@@ -141,11 +143,13 @@ CLI · search · fetch · research · deep-research
        ├─ DuckDuckGo · HN Algolia · Jina + Bing
        ├─ arXiv · Wikipedia · Reddit
        ├─ GitHub · Stack Exchange · OpenStreetMap
-       └─ Twitter/X via DuckDuckGo + Jina
+       ├─ Twitter/X via DuckDuckGo + Jina
+       └─ YouTube via DuckDuckGo + Jina
   └─ deep-research pipeline (no AI model)
-       ├─ Query decomposition → Routing → Parallel sub-agents
-       ├─ Ranking → Evidence extraction → Contradiction detection
-       └─ Structured report + optional refinement
+       ├─ Query decomposition → Per-entity comparison branches
+       ├─ Routing → Parallel sub-agents → Quality gated ranking
+       ├─ Evidence extraction → Contradiction detection → Source diversity metrics
+       └─ Structured report with capping controls + audit metadata
 ```
 
 ## Design

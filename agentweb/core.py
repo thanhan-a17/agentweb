@@ -100,6 +100,8 @@ class FetchResult:
         score = 0.0
         if self.ok:
             score += 2.0
+        else:
+            score -= 3.0
         if self.title:
             score += 0.5
         text_len = len(self.text.strip())
@@ -131,9 +133,11 @@ class FetchResult:
                     score -= 0.3
         # Penalties
         if any("block" in w.lower() or "captcha" in w.lower() for w in self.warnings):
-            score -= 2.0
+            score -= 3.0
         if self.status_code and self.status_code >= 400:
             score -= 1.5
+        if text_len < 200:
+            score -= 2.0
         return max(0.0, min(score, 10.0))
 
     def to_dict(self, max_chars: int = 12000) -> dict[str, Any]:
@@ -151,6 +155,7 @@ class FetchResult:
             "source": self.source,
             "title": self.title,
             "text": text,
+            "text_len": len(self.text),
             "links": self.links[:50],
             "metadata": self.metadata,
             "tactics": self.tactics,
@@ -935,7 +940,42 @@ def fetch_url(
 
     result.text = text[:max_chars] if max_chars else text
     result.text = redact_secrets(result.text)
-    result.ok = bool(text) and not (result.status_code and result.status_code >= 500)
+
+    # ── Bot-block detection ──
+    bot_blocked = False
+    if result.text:
+        lower_text = result.text.lower()
+        bot_patterns = [
+            "please wait for verification",
+            "just a moment...",
+            "access to this page has been denied",
+            "enable javascript and cookies to continue",
+            "checking your browser",
+            "cf-turnstile",
+            "cf-challenge",
+            # Jina-reader wrapped error indicators
+            "warning: target url returned error",
+            "target url returned error",
+            "you've been blocked by network security",
+            "blocked by network security",
+            "error: forbidden",
+            "error: not found",
+            "error: too many requests",
+        ]
+        for pat in bot_patterns:
+            if pat in lower_text:
+                bot_blocked = True
+                warnings.append("bot_blocked_content_detected")
+                break
+
+    if result.status_code in (401, 403):
+        bot_blocked = True
+
+    result.ok = (
+        bool(text)
+        and not (result.status_code and result.status_code >= 400)
+        and not bot_blocked
+    )
     result.source = tactics[-1] if tactics else "none"
     result.tactics = tactics
     result.warnings = sorted(set(warnings))
@@ -1024,14 +1064,32 @@ def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
 
 
 def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search DuckDuckGo HTML for URL discovery.
+
+    Snippet extraction is best-effort — DDG HTML changes frequently.
+    Primary value: discovering URLs that other providers may miss.
+    Downstream fetchers (Jina Reader, direct fetch) populate actual content.
+    """
     url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
     resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
     raw = resp.text
     items: list[SearchResult] = []
-    for block in re.findall(r'(?is)<div class="result results_links.*?</div>\s*</div>', raw):
-        href_match = re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
+
+    # DDG result blocks — try multiple selectors because markup changes
+    blocks = re.findall(r'(?is)<div class="result results_links.*?</div>\s*</div>', raw)
+    if not blocks:
+        # Fallback: any div with result class
+        blocks = re.findall(r'(?is)<div[^>]*class="[^"]*result[^"]*".*?</div>\s*</div>', raw)
+
+    for block in blocks:
+        # Try multiple patterns for the title/link
+        href_match = (
+            re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
+            or re.search(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
+        )
         if not href_match:
             continue
+
         href = html.unescape(href_match.group(1))
         parsed = urllib.parse.urlparse(href)
         qs = urllib.parse.parse_qs(parsed.query)
@@ -1039,11 +1097,27 @@ def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[
             href = qs["uddg"][0]
         if _is_duckduckgo_ad_url(href):
             continue
+
+        title = _clean_text(_strip_html(href_match.group(2)))
+
+        # Best-effort snippet extraction — multiple selectors
         snippet = ""
-        sn = re.search(r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', block)
-        if sn:
-            snippet = _clean_text(_strip_html(sn.group(1)))
-        items.append(SearchResult(_clean_text(_strip_html(href_match.group(2))), href, snippet, "duckduckgo"))
+        for pat in [
+            r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+            r'(?is)<div[^>]+class="result__snippet"[^>]*>(.*?)</div>',
+            r'(?is)<span[^>]+class="snippet"[^>]*>(.*?)</span>',
+            r'(?is)<div[^>]+class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
+        ]:
+            sn = re.search(pat, block)
+            if sn:
+                snippet = _clean_text(_strip_html(sn.group(1)))
+                break
+
+        # If no snippet, use title as fallback so interleaving still has relevance signal
+        if not snippet and title:
+            snippet = title
+
+        items.append(SearchResult(title or href, href, snippet, "duckduckgo"))
         if len(items) >= max_results:
             break
     return items
@@ -1120,6 +1194,10 @@ def research(
             if not any(excl in (r.source or "").lower() for excl in exclude_lower)
         ]
 
+    # Filter out low-quality sources before building the answer pack
+    quality_sources = [r for r in fetched if r.quality_score() >= 3.0]
+    filtered_sources_count = len(fetched) - len(quality_sources)
+
     # Compute coverage and gaps using deep_research utilities
     from agentweb.deep_research import (
         _detect_knowledge_gaps,
@@ -1127,19 +1205,25 @@ def research(
         _suggest_followups,
     )
 
-    coverage_score = _research_coverage_score(query, fetched)
-    knowledge_gaps = _detect_knowledge_gaps(query, fetched)
+    coverage_score = _research_coverage_score(query, quality_sources)
+    knowledge_gaps = _detect_knowledge_gaps(query, quality_sources)
     suggested_followups = _suggest_followups(query, knowledge_gaps)
 
     return {
         "query": query,
         "generated_at": email.utils.formatdate(usegmt=True),
+        "coverage": {
+            "requested": max_results,
+            "fetched": len(fetched),
+            "quality_passed": len(quality_sources),
+        },
         "coverage_score": round(coverage_score * 100, 1),  # 0–100% scale
+        "filtered_sources_count": filtered_sources_count,
         "knowledge_gaps": knowledge_gaps,
         "suggested_followups": suggested_followups,
         "search_results": [r.to_dict() for r in search_results],
-        "sources": [r.to_dict(max_chars=max_chars) for r in fetched],
-        "answer_pack": _answer_pack(query, fetched),
+        "sources": [r.to_dict(max_chars=max_chars) for r in quality_sources],
+        "answer_pack": _answer_pack(query, quality_sources),
     }
 
 
@@ -1485,6 +1569,10 @@ def _search_reddit_api(query: str, max_results: int, timeout: int) -> list[Searc
             return []
         data = resp.json()
         items: list[SearchResult] = []
+        # Known pump subreddits to filter out
+        _BLOCKED_SUBREDDITS = {"IBRX", "Livimmune", "DRTS_Stock"}
+        query_terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9]{3,}", query)}
+
         for child in data.get("data", {}).get("children", []):
             d = child.get("data", {})
             title = d.get("title", "")
@@ -1496,6 +1584,19 @@ def _search_reddit_api(query: str, max_results: int, timeout: int) -> list[Searc
             subreddit = d.get("subreddit", "")
             score = d.get("score", 0)
             comments = d.get("num_comments", 0)
+
+            # Relevance filtering
+            if score < 2:
+                continue
+            if subreddit in _BLOCKED_SUBREDDITS:
+                continue
+            if query_terms:
+                selftext = (d.get("selftext") or "")[:250]
+                content = f"{title} {selftext}".lower()
+                matched = sum(1 for t in query_terms if t in content)
+                if matched / len(query_terms) < 0.15:
+                    continue
+
             # Build rich snippet
             selftext = (d.get("selftext") or "")[:250]
             sentence = (
@@ -1517,7 +1618,27 @@ def _search_reddit_api(query: str, max_results: int, timeout: int) -> list[Searc
 def _search_reddit_site(query: str, max_results: int, timeout: int) -> list[SearchResult]:
     """Search Reddit via Jina general search with site:reddit.com operator."""
     site_query = f"site:reddit.com {query}"
-    return _search_jina_general(site_query, max_results, timeout)
+    results = _search_jina_general(site_query, max_results, timeout)
+
+    # Apply relevance filtering to Jina-returned Reddit results
+    _BLOCKED_SUBREDDITS = {"IBRX", "Livimmune", "DRTS_Stock"}
+    query_terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9]{3,}", query)}
+    filtered: list[SearchResult] = []
+    for r in results:
+        # Filter known pump subreddits by URL
+        url_lower = r.url.lower()
+        if any(f"/r/{sub.lower()}/" in url_lower for sub in _BLOCKED_SUBREDDITS):
+            continue
+        # Require at least 15% query-term overlap in title+snippet
+        if query_terms:
+            content = f"{r.title} {r.snippet}".lower()
+            matched = sum(1 for t in query_terms if t in content)
+            if matched / len(query_terms) < 0.15:
+                continue
+        filtered.append(r)
+        if len(filtered) >= max_results:
+            break
+    return filtered
 
 
 def _search_twitter_site(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -1544,7 +1665,46 @@ def _search_twitter_site(query: str, max_results: int, timeout: int) -> list[Sea
     except Exception:
         pass
     # Fallback: Jina Reader through DDG
-    return _search_jina_general(site_query, max_results, timeout)
+    try:
+        results = _search_jina_general(site_query, max_results, timeout)
+        for r in results:
+            r.source = "twitter"
+        return results
+    except Exception:
+        return []
+
+
+def _search_youtube(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search YouTube via DDG/Jina with site operator.
+
+    YouTube's Data API requires an API key, so we use ``site:youtube.com``
+    through DuckDuckGo HTML and Jina Reader in sequence.  Catches YouTube
+    video results (title, URL, snippet) in search indexes without needing
+    any credentials.
+
+    Falls back cleanly with 0 results when YouTube content isn't indexed.
+    The other providers in the broad pipeline still deliver diverse results.
+
+    Returns: SearchResult list with source="youtube".
+    """
+    site_query = f"site:youtube.com {query}"
+    # Try DDG HTML first (better for site: operator queries)
+    try:
+        results = _search_duckduckgo_html(site_query, max_results, timeout)
+        if results:
+            for r in results:
+                r.source = "youtube"
+            return results
+    except Exception:
+        pass
+    # Fallback: Jina Reader through DDG
+    try:
+        results = _search_jina_general(site_query, max_results, timeout)
+        for r in results:
+            r.source = "youtube"
+        return results
+    except Exception:
+        return []
 
 
 # Provider dispatch table
@@ -1743,17 +1903,17 @@ _SECTOR_PROVIDERS: dict[str, list] = {
     "tech": [
         _search_duckduckgo_html, _search_via_jina_reader,
         _search_hn_algolia, _search_github_api,
-        _search_reddit_api, _search_arxiv_api,
+        _search_reddit_api, _search_arxiv_api, _search_youtube,
     ],
     "food": [
         _search_duckduckgo_html, _search_via_jina_reader,
         _search_reddit_api, _search_wikipedia_api,
-        _search_nominatim,
+        _search_nominatim, _search_youtube,
     ],
     "travel": [
         _search_duckduckgo_html, _search_via_jina_reader,
         _search_reddit_api, _search_wikipedia_api,
-        _search_nominatim,
+        _search_nominatim, _search_youtube,
     ],
     "shopping": [
         _search_duckduckgo_html, _search_via_jina_reader,
@@ -1761,15 +1921,15 @@ _SECTOR_PROVIDERS: dict[str, list] = {
     ],
     "health": [
         _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api,
+        _search_reddit_api, _search_wikipedia_api, _search_youtube,
     ],
     "academic": [
         _search_arxiv_api, _search_wikipedia_api,
-        _search_duckduckgo_html, _search_via_jina_reader,
+        _search_duckduckgo_html, _search_via_jina_reader, _search_youtube,
     ],
     "entertainment": [
         _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api,
+        _search_reddit_api, _search_wikipedia_api, _search_youtube,
     ],
     "news": [
         _search_duckduckgo_html, _search_via_jina_reader,
@@ -1777,7 +1937,7 @@ _SECTOR_PROVIDERS: dict[str, list] = {
     ],
     "general": [
         _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api,
+        _search_reddit_api, _search_wikipedia_api, _search_youtube,
     ],
 }
 
@@ -1906,6 +2066,7 @@ _SEARCH_PROVIDERS: dict[str, list] = {
     "github": [_search_github_api],
     "nominatim": [_search_nominatim],
     "twitter": [_search_twitter_site],
+    "youtube": [_search_youtube],
     "xcom": [_search_twitter_site],
     "bing": [_search_via_jina_reader],
     "jina": [_search_jina_general],
