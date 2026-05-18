@@ -16,9 +16,10 @@ Requirements: Python 3.11+ and either `pip` or `uv` (preferred).
 Steps:
 1. Check if AgentWeb is already installed (`agentweb --version`).
 2. If not, install it:
-   - With uv (preferred): `uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'`
+   - With uv (preferred): `uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
    - Or with pip: `pip install git+https://github.com/thanhan-a17/agentweb.git`
    - With extras (JS-heavy sites): `pip install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'`
+   - With YouTube transcripts: `pip install 'agentweb[youtube] @ git+https://github.com/thanhan-a17/agentweb.git'`
 3. Verify installation by running `agentweb search "Nous Research Hermes Agent 2026" --format json` and confirming it returns structured results with titles, URLs, and confidence scores.
 4. Show me a quick summary of what's installed and that it works.
 ```
@@ -32,6 +33,12 @@ pip install git+https://github.com/thanhan-a17/agentweb.git
 ```bash
 # with browser/crawl extras for JS-heavy sites
 pip install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# with YouTube transcript support
+pip install 'agentweb[youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# all extras
+pip install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
 ```
 
 ```bash
@@ -40,13 +47,19 @@ uv tool install git+https://github.com/thanhan-a17/agentweb.git
 
 # with browser/crawl extras for JS-heavy sites
 uv tool install 'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# with YouTube transcript support (yt-dlp + youtube_transcript_api)
+uv tool install 'agentweb[youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
+
+# with all extras
+uv tool install 'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git'
 ```
 
 ```bash
 # from source
 git clone https://github.com/thanhan-a17/agentweb
 cd agentweb
-uv tool install '.[browser,crawl]'
+uv tool install '.[browser,crawl,youtube]'
 ```
 
 To upgrade:
@@ -171,6 +184,7 @@ CLI · search · fetch · research · deep-research
 
 - **Auth profiles** — persistent browser sessions with cookie reuse. Login once, reuse across fetches.
 - **Safety guards** — input validation, secret redaction on all output paths.
+- **YouTube transcripts** — auto-detects YouTube URLs in fetch and extracts video transcripts via yt-dlp or youtube_transcript_api. No API key, no OAuth.
 - **Stealth browser** — Three preset levels (off/standard/aggressive). Canvas noise, WebGL spoofing, and more.
 
 ## License
