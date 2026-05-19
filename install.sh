@@ -62,6 +62,25 @@ else
     exit 1
 fi
 
+# ── Step 4: Install Hermes skill (if Hermes is present) ──
+HERMES_SKILL_DIR="$HOME/.hermes/skills/software-development/agentweb-use"
+if [ -d "$HOME/.hermes" ]; then
+    echo ""
+    echo -e "${YELLOW}→ Installing Hermes skill for agentweb-use...${NC}"
+    mkdir -p "$HERMES_SKILL_DIR/references"
+    # Download SKILL.md and reference files from the repo
+    BASE_URL="https://raw.githubusercontent.com/$REPO/main/hermes-skill"
+    curl -fsSL "$BASE_URL/SKILL.md" -o "$HERMES_SKILL_DIR/SKILL.md" 2>/dev/null
+    for ref in agentweb-v0.2.0-test-sweep-findings.md agentweb-vs-others-comparison.md llm-benchmark-research-session.md multi-source-research-tips.md vn-coffee-market-research-pattern.md; do
+        curl -fsSL "$BASE_URL/references/$ref" -o "$HERMES_SKILL_DIR/references/$ref" 2>/dev/null
+    done
+    echo -e "${GREEN}✓ Hermes skill installed${NC}"
+else
+    echo ""
+    echo -e "${YELLOW}→ ~/.hermes not found — skipping Hermes skill install${NC}"
+    echo "  (Hermes Agent users can install manually: mkdir -p ~/.hermes/skills/software-development/agentweb-use && curl -fsSL https://raw.githubusercontent.com/$REPO/main/hermes-skill/install-hermes.sh | bash)"
+fi
+
 echo ""
 echo -e "${BOLD}Quick test:${NC}"
 echo "  agentweb search \"hello world\" --format json"
