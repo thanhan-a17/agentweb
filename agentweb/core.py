@@ -8,17 +8,19 @@ readability extraction, browser fallbacks, and weird SPA payloads itself.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import collections.abc
 import concurrent.futures
 import email.utils
 import html
 import json
 import os
-import math
 import random
 import re
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 import urllib.parse
@@ -28,6 +30,7 @@ from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any, Iterable
 
+import httpx
 import requests
 
 from agentweb.errors import (
@@ -41,6 +44,8 @@ from agentweb.errors import (
 )
 from agentweb.authenticity import ContentAuthenticity
 from agentweb.safety import redact_secrets
+
+from ddgs import DDGS
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -58,15 +63,13 @@ def _now() -> str:
 # Default stopwords used across AgentWeb modules (sector classification, semantic routing, etc.)
 _DEFAULT_STOPWORDS: frozenset[str] = frozenset({
     "the", "and", "for", "are", "but", "not", "you", "all", "can",
-    "was", "one", "our", "out", "get", "has", "him", "his", "how",
-    "its", "may", "new", "now", "old", "see", "two", "way", "who",
-    "did", "she", "use", "via", "that", "from", "have", "been",
-    "were", "said", "also", "they", "this", "what", "than",
-    "with", "their", "about", "into", "over", "after", "some",
-    "more", "most", "much", "many", "very", "just", "like",
-    "do", "it", "is", "be", "to", "of", "in", "on", "at",
-    "by", "as", "an", "or", "if", "so", "up", "no", "we",
-    "he", "she", "my", "me", "go", "am", "pm",
+    "was", "one", "our", "out", "get", "has", "its", "may", "new",
+    "now", "old", "see", "two", "way", "who", "did", "she", "use",
+    "via", "that", "from", "have", "been", "were", "said", "also",
+    "they", "this", "what", "than", "with", "their", "about", "into",
+    "over", "after", "some", "more", "most", "much", "many", "very",
+    "just", "like", "do", "it", "is", "be", "to", "of", "in", "on",
+    "at", "by", "as", "an", "or", "if", "so", "up", "no", "we",
 })
 
 
@@ -202,6 +205,12 @@ class SearchResult:
 
 
 def _session(timeout: int = 20, cookies: str | None = None, headers: dict[str, str] | None = None) -> requests.Session:
+    """Legacy session creator kept for search providers that still use requests.
+
+    New fetch code should use _get_httpx_client() + _fetch_http_async() instead.
+    This function is preserved for backward compat with _search_* providers,
+    _fetch_reddit, _fetch_jina, and other non-fetch-url callers.
+    """
     s = requests.Session()
     s.headers.update(
         {
@@ -253,6 +262,79 @@ def _get_default_session() -> requests.Session:
 
 
 _DEFAULT_SESSION: requests.Session | None = None
+
+
+# ── Async HTTP Client (httpx) ──────────────────────────────────────────
+# Shared AsyncClient with connection pooling for the fetch pipeline.
+# Created once, reused across all calls to fetch_url().
+_HTTPX_CLIENT: httpx.AsyncClient | None = None
+_HTTPX_LOCK = threading.Lock()
+
+
+def _get_httpx_client() -> httpx.AsyncClient:
+    """Get or create the shared httpx.AsyncClient with connection pooling.
+
+    The client is created once with standard headers and a generous default
+    timeout. Per-request timeouts override the default via client.get(timeout=N).
+    """
+    global _HTTPX_CLIENT
+    if _HTTPX_CLIENT is None:
+        with _HTTPX_LOCK:
+            if _HTTPX_CLIENT is None:
+                _HTTPX_CLIENT = httpx.AsyncClient(
+                    headers={
+                        "User-Agent": USER_AGENTS[0],
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "DNT": "1",
+                        "Upgrade-Insecure-Requests": "1",
+                    },
+                    timeout=httpx.Timeout(30.0),
+                    follow_redirects=True,
+                )
+    return _HTTPX_CLIENT
+
+
+async def _fetch_http_async(
+    url: str,
+    *,
+    timeout: int = 20,
+    cookies: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[str, int, str, dict[str, str]]:
+    """Async HTTP fetch using the shared httpx.AsyncClient.
+
+    Returns (raw_html, status_code, final_url, response_headers).
+    Raises on network errors; caller is fetch_url() which handles exceptions.
+    Connection pooling is automatic via the shared client.
+    """
+    client = _get_httpx_client()
+
+    req_headers: dict[str, str] = {}
+    if cookies:
+        p = Path(cookies).expanduser()
+        if p.exists():
+            jar = MozillaCookieJar(str(p))
+            jar.load(ignore_discard=True, ignore_expires=True)
+            cookie_parts = [f"{c.name}={c.value}" for c in jar]
+            if cookie_parts:
+                req_headers["Cookie"] = "; ".join(cookie_parts)
+        else:
+            req_headers["Cookie"] = cookies
+    if headers:
+        req_headers.update(headers)
+
+    resp = await client.get(url, headers=req_headers or None, timeout=timeout)
+
+    return resp.text or "", resp.status_code, str(resp.url), dict(resp.headers)
+
+
+def _run_async(coro: collections.abc.Coroutine) -> Any:
+    """Run an async coroutine from a sync context.
+
+    Uses asyncio.run() since no callers are in an existing event loop.
+    """
+    return asyncio.run(coro)
 
 
 def _safe_url(url: str) -> str:
@@ -340,15 +422,17 @@ def _extract_title(raw: str) -> str:
     return ""
 
 
-def _extract_metadata(raw: str, response: requests.Response | None = None) -> dict[str, str]:
+def _extract_metadata(raw: str, response: requests.Response | None = None, headers: dict[str, str] | None = None) -> dict[str, str]:
     meta: dict[str, str] = {}
-    if response is not None:
+    # Accept either a requests.Response or a plain headers dict (httpx compat)
+    source_headers = response.headers if response is not None else (headers or {})
+    if source_headers:
         for key in ["content-type", "last-modified", "etag"]:
-            val = response.headers.get(key)
+            val = source_headers.get(key)
             if val:
                 meta[key] = val
-        if response.headers.get("date"):
-            meta["fetched_server_date"] = response.headers["date"]
+        if source_headers.get("date"):
+            meta["fetched_server_date"] = source_headers["date"]
     for m in re.finditer(r'(?is)<meta\s+([^>]+)>', raw):
         attrs = dict(re.findall(r'([\w:-]+)=["\']([^"\']*)["\']', m.group(1)))
         name = attrs.get("name") or attrs.get("property")
@@ -877,34 +961,63 @@ def fetch_url(
             return reddit_result
         # If Reddit specialized fetch failed, fall through to generic HTTP
 
-    # ── Phase 1: Generic HTTP fetch ──
-    s = _session(timeout=timeout, cookies=cookies, headers=headers)
+    # ── Phase 1: Generic HTTP fetch (async via httpx.AsyncClient) ──
     raw = ""
-    response: requests.Response | None = None
+    resp_headers: dict[str, str] = {}
     try:
         tactics.append("direct_http")
-        response = s.get(url, allow_redirects=True)
-        result.status_code = response.status_code
-        result.final_url = response.url
-        ctype = response.headers.get("content-type", "")
-        if not any(h in ctype for h in TEXT_MIME_HINTS) and response.content:
+        raw, status_code, final_url, resp_headers = _run_async(
+            _fetch_http_async(url, timeout=timeout, cookies=cookies, headers=headers)
+        )
+        result.status_code = status_code
+        result.final_url = final_url
+        ctype = resp_headers.get("content-type", "")
+        if not any(h in ctype for h in TEXT_MIME_HINTS) and raw:
             warnings.append(f"non_text_content_type:{ctype or 'unknown'}")
-        response.encoding = response.encoding or response.apparent_encoding
-        raw = response.text or ""
     except Exception as exc:
         warnings.append(f"direct_http_failed:{type(exc).__name__}")
 
     text = ""
     if raw:
-        next_payload = _extract_nextjs_payload(raw)
-        visible = _strip_html(raw)
-        text = visible
-        if next_payload and len(next_payload) > len(visible) * 0.25:
-            tactics.append("nextjs_rsc_payload")
-            text = _clean_text(visible + "\n\n[Next.js/RSC payload]\n" + next_payload)
+        # ── Tier 1a: trafilatura extraction (primary, local, fast) ──
+        # trafilatura extracts clean article text from HTML in <50ms,
+        # replacing the manual _strip_html() approach for most pages.
+        trafilatura_text = ""
+        try:
+            import trafilatura  # type: ignore[import-untyped]
+
+            extracted = trafilatura.extract(
+                raw,
+                include_comments=False,
+                include_tables=True,
+                include_links=True,
+                output_format="txt",
+                no_fallback=False,
+            )
+            if extracted and len(extracted.strip()) > 200:
+                trafilatura_text = extracted.strip()
+                tactics.append("trafilatura_extraction")
+        except ImportError:
+            pass  # trafilatura not installed (should be a core dep)
+        except Exception:
+            pass  # extraction failed, fall through to HTML stripping
+
+        if trafilatura_text:
+            text = trafilatura_text
+        else:
+            # ── Tier 1b: Fallback to raw HTML stripping ──
+            # Used when trafilatura is unavailable or returns insufficient text
+            # (e.g. JS-rendered pages, non-article content).
+            next_payload = _extract_nextjs_payload(raw)
+            visible = _strip_html(raw)
+            text = visible
+            if next_payload and len(next_payload) > len(visible) * 0.25:
+                tactics.append("nextjs_rsc_payload")
+                text = _clean_text(visible + "\n\n[Next.js/RSC payload]\n" + next_payload)
+
         result.title = _extract_title(raw)
         result.links = _extract_links(raw, result.final_url or url)
-        result.metadata = _extract_metadata(raw, response)
+        result.metadata = _extract_metadata(raw, headers=resp_headers)
 
     # ── Content authenticity assessment ──
     # Domain-agnostic: we check if the response actually contains real content.
@@ -914,7 +1027,7 @@ def fetch_url(
     # ── Phase 2: Jina Reader fallback ──
     # Try Jina when content looks suspicious (low authenticity score).
     # Jina is excellent for article-like pages and often bypasses bot guards
-    # or ad-heavy markup that direct HTTP can't handle.
+    # or ad-heavy markup that direct HTTP + trafilatura can't handle.
     if use_jina and authenticity < ContentAuthenticity.SUSPICIOUS_THRESHOLD:
         jina = _fetch_jina(url, timeout=timeout)
         if jina:
@@ -1063,74 +1176,26 @@ def _fetch_with_agent_browser(url: str, timeout: int = 30) -> str:
     return ""
 
 
-def _search_duckduckgo_html(query: str, max_results: int, timeout: int) -> list[SearchResult]:
-    """Search DuckDuckGo HTML for URL discovery.
+def _search_duckduckgo(query: str, max_results: int, timeout: int) -> list[SearchResult]:
+    """Search DuckDuckGo via duckduckgo-search library.
 
-    Snippet extraction is best-effort — DDG HTML changes frequently.
-    Primary value: discovering URLs that other providers may miss.
-    Downstream fetchers (Jina Reader, direct fetch) populate actual content.
+    Uses the maintained duckduckgo-search package (deedy5, MIT) which returns
+    structured results (title, href, body) via primp (Rust HTTP client).
+    No HTML parsing, no regex — ~0.4s vs 3.5s via Jina proxy.
     """
-    url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-    resp = requests.get(url, headers={"User-Agent": USER_AGENTS[0]}, timeout=timeout)
-    raw = resp.text
-    items: list[SearchResult] = []
-
-    # DDG result blocks — try multiple selectors because markup changes
-    blocks = re.findall(r'(?is)<div class="result results_links.*?</div>\s*</div>', raw)
-    if not blocks:
-        # Fallback: any div with result class
-        blocks = re.findall(r'(?is)<div[^>]*class="[^"]*result[^"]*".*?</div>\s*</div>', raw)
-
-    for block in blocks:
-        # Try multiple patterns for the title/link
-        href_match = (
-            re.search(r'(?is)<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
-            or re.search(r'(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block)
-        )
-        if not href_match:
-            continue
-
-        href = html.unescape(href_match.group(1))
-        parsed = urllib.parse.urlparse(href)
-        qs = urllib.parse.parse_qs(parsed.query)
-        if "uddg" in qs:
-            href = qs["uddg"][0]
-        if _is_duckduckgo_ad_url(href):
-            continue
-
-        title = _clean_text(_strip_html(href_match.group(2)))
-
-        # Best-effort snippet extraction — multiple selectors
-        snippet = ""
-        for pat in [
-            r'(?is)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-            r'(?is)<div[^>]+class="result__snippet"[^>]*>(.*?)</div>',
-            r'(?is)<span[^>]+class="snippet"[^>]*>(.*?)</span>',
-            r'(?is)<div[^>]+class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
-        ]:
-            sn = re.search(pat, block)
-            if sn:
-                snippet = _clean_text(_strip_html(sn.group(1)))
-                break
-
-        # If no snippet, use title as fallback so interleaving still has relevance signal
-        if not snippet and title:
-            snippet = title
-
-        items.append(SearchResult(title or href, href, snippet, "duckduckgo"))
-        if len(items) >= max_results:
-            break
-    return items
-
-
-def _is_duckduckgo_ad_url(url: str) -> bool:
     try:
-        p = urllib.parse.urlparse(url)
+        ddgs = DDGS()
+        raw = ddgs.text(query, max_results=max_results)
+        items: list[SearchResult] = []
+        for r in raw:
+            title = (r.get("title") or "").strip()
+            href = (r.get("href") or "").strip()
+            body = (r.get("body") or "").strip()
+            if title and href:
+                items.append(SearchResult(title, href, body, "duckduckgo"))
+        return items
     except Exception:
-        return False
-    host = p.netloc.lower()
-    qs = urllib.parse.parse_qs(p.query)
-    return host.endswith("duckduckgo.com") and (p.path.endswith("/y.js") or "ad_domain" in qs or "ad_provider" in qs)
+        return []
 
 
 def _search_hn_algolia(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -1158,6 +1223,7 @@ def research(
     max_chars: int = 6000,
     refine: str = "",
     exclude_sources: list[str] | None = None,
+    context: Any = None,
 ) -> dict[str, Any]:
     # Apply refine: append refinement text to the search query
     search_query = f"{query} {refine}".strip() if refine else query
@@ -1657,7 +1723,7 @@ def _search_twitter_site(query: str, max_results: int, timeout: int) -> list[Sea
     site_query = f"site:twitter.com OR site:x.com {query}"
     # Try DDG HTML first (better for site: operator queries)
     try:
-        results = _search_duckduckgo_html(site_query, max_results, timeout)
+        results = _search_duckduckgo(site_query, max_results, timeout)
         if results:
             for r in results:
                 r.source = "twitter"
@@ -1690,7 +1756,7 @@ def _search_youtube(query: str, max_results: int, timeout: int) -> list[SearchRe
     site_query = f"site:youtube.com {query}"
     # Try DDG HTML first (better for site: operator queries)
     try:
-        results = _search_duckduckgo_html(site_query, max_results, timeout)
+        results = _search_duckduckgo(site_query, max_results, timeout)
         if results:
             for r in results:
                 r.source = "youtube"
@@ -1758,200 +1824,29 @@ def _search_nominatim(query: str, max_results: int, timeout: int) -> list[Search
 # SECTOR ROUTER — classify queries into domains, route to relevant providers
 # ═══════════════════════════════════════════════════════════════════
 
-# Sector seed terms for query classification.
-# Multi-word seeds get 3× weight (stronger signal).
-_SECTOR_SEEDS: dict[str, set[str]] = {
-    "tech": {
-        "code", "coding", "programming", "software", "app", "apps",
-        "api", "framework", "library", "github", "git", "deploy",
-        "server", "database", "python", "javascript", "react", "docker",
-        "linux", "windows", "macos", "cli", "terminal", "algorithm",
-        "bug", "error", "crash", "compile", "runtime", "debug",
-        "startup", "saas", "cloud", "devops", "kubernetes", "aws",
-        "ai", "ml", "llm", "neural", "gpu", "tensorflow", "pytorch",
-        "website", "web", "backend", "frontend", "fullstack",
-        "computer", "laptop", "monitor", "keyboard", "tech",
-        "download", "install", "setup", "configuration",
-        "tutorial", "guide", "documentation",
-    },
-    "food": {
-        "food", "foods", "recipe", "recipes", "cook", "cooking", "bake", "baking",
-        "restaurant", "restaurants", "cafe", "cuisine", "dish", "dishes",
-        "meal", "meals", "dinner", "dinners", "lunch", "breakfast", "ingredient", "chef", "kitchen",
-        "delicious", "tasty", "flavor", "spicy", "sweet",
-        "pho", "pizza", "pasta", "sushi", "burger", "salad",
-        "chicken", "beef", "pork", "fish", "vegetarian", "vegan",
-        "wine", "coffee", "tea", "beer", "cocktail",
-        "nutrition", "calories", "healthy eating",
-        "eat", "dining", "brunch",
-        "bread", "soup", "sauce", "pancake", "pancakes",
-        "chocolate", "cheese", "butter", "rice", "noodle", "noodles",
-        "fruit", "vegetable", "vegetables", "tofu", "egg", "eggs",
-        "bake", "roast", "roasting", "grill", "fry", "frying",
-        "yummy", "homemade", "organic",
-        "snack", "snacks",
-    },
-    "travel": {
-        "travel", "trip", "trips", "vacation", "holiday", "holidays",
-        "tourist", "tourism", "tour",
-        "hotel", "hotels", "hostel", "hostels", "resort", "resorts",
-        "flight", "flights", "airport", "airports", "airline", "airlines",
-        "destination", "destinations", "visit", "sightseeing", "attraction", "attractions",
-        "beach", "beaches", "mountain", "mountains", "hiking", "camping", "road trip",
-        "passport", "visa", "backpacking", "cruise",
-        "city", "cities", "country", "countries", "province", "island", "islands", "abroad",
-        "map", "direction", "directions", "location", "address", "near me",
-        "museum", "museums", "park", "parks", "temple", "church", "churches", "market",
-        "accommodation", "lodging",
-        "itinerary", "explore", "wander",
-    },
-    "shopping": {
-        "buy", "purchase", "order", "shop", "shopping", "store",
-        "product", "price", "cost", "cheap", "expensive", "deal",
-        "discount", "sale", "coupon", "offer",
-        "amazon", "ebay", "etsy", "walmart", "aliexpress",
-        "delivery", "shipping", "return", "warranty",
-        "review", "reviews", "rating", "ratings", "top",
-        "gift", "gifts", "present", "accessory", "fashion", "clothing",
-        "electronics", "gadget", "gadgets", "furniture", "decor",
-        "headphones", "speaker", "speakers", "laptop", "laptops",
-        "phone", "phones", "tablet", "tablets", "camera", "cameras",
-        "tv", "monitor", "monitors", "printer", "printers",
-    },
-    "health": {
-        "health", "healthy", "fitness", "exercise", "workout",
-        "diet", "weight loss", "muscle", "yoga", "meditation",
-        "doctor", "hospital", "clinic", "pharmacy", "medicine",
-        "symptom", "disease", "illness", "condition", "treatment",
-        "therapy", "surgery", "diagnosis", "prevention",
-        "vitamin", "supplement", "protein",
-        "mental health", "anxiety", "depression",
-        "sleep", "insomnia", "headache", "pain",
-        "pregnancy", "baby",
-    },
-    "academic": {
-        "paper", "research", "study", "academic", "preprint",
-        "publication", "scientific", "scholar", "doi",
-        "conference", "journal", "experiment", "methodology",
-        "benchmark", "dataset", "thesis", "dissertation",
-        "professor", "lecture", "curriculum",
-        "science", "mathematics", "physics", "chemistry", "biology",
-    },
-    "entertainment": {
-        "movie", "movies", "film", "films", "tv", "show", "shows",
-        "series", "episode", "episodes",
-        "music", "song", "songs", "album", "albums", "artist", "artists",
-        "band", "concert", "concerts",
-        "game", "games", "gaming", "video game", "playstation", "xbox", "nintendo",
-        "book", "books", "novel", "novels", "author", "authors",
-        "reading", "literature",
-        "anime", "manga", "comic", "comics", "cartoon", "cartoons",
-        "sport", "sports", "football", "soccer", "basketball", "tennis",
-        "celebrity", "celebrities", "actor", "actors", "actress", "actresses", "director",
-        "stream", "streaming", "netflix", "youtube", "spotify",
-        "funny", "joke", "jokes", "meme", "memes",
-        "watch", "listen", "walkthrough", "walkthroughs", "gameplay",
-        "review", "reviews", "rating", "ratings",
-    },
-    "news": {
-        "news", "breaking", "headline", "headlines", "report", "reports",
-        "coverage", "latest", "update", "updates", "announcement", "announcements",
-        "election", "policy", "government", "politics", "political",
-        "economy", "market", "markets", "stock", "stocks", "crypto", "bitcoin",
-        "war", "conflict", "protest", "protests", "scandal",
-    },
-}
+def search_web(
+    query: str,
+    *,
+    max_results: int = 8,
+    timeout: int = 20,
+    prefer: list[str] | None = None,
+    exclude: list[str] | None = None,
+    context: Any = None,
+) -> list[SearchResult]:
+    """Search the web across all registered providers.
 
+    Delegates to :func:`agentweb.engine.search.search_providers` which
+    queries every provider in the registry in parallel, applies
+    per-provider timeouts, short-circuits when enough results are found,
+    and ranks results via BM25 + FlashRank.
 
-def _classify_sector(query: str) -> str:
-    """Classify a query into a sector using keyword overlap scoring.
-
-    Returns one of: tech, food, travel, shopping, health, academic,
-    entertainment, news, general.
-    """
-    q_lower = query.lower()
-    tokens = {m.group() for m in re.finditer(r"[a-zA-Z]{3,}", q_lower)
-              if m.group() not in _DEFAULT_STOPWORDS}
-
-    best_sector = "general"
-    best_score = 0
-
-    for sector, seeds in _SECTOR_SEEDS.items():
-        score = 0
-        for seed in seeds:
-            if " " in seed:
-                # Multi-word seed: substring match gives strong signal
-                if seed in q_lower:
-                    score += 3
-            else:
-                if seed in tokens:
-                    score += 1
-        if score > best_score:
-            best_score = score
-            best_sector = sector
-
-    # If no sector scored above a single keyword match, stay general
-    if best_score <= 0:
-        return "general"
-    return best_sector
-
-
-# Sector → relevant search provider functions.
-# Each sector only queries sources that make sense for its domain,
-# avoiding noise from irrelevant providers (e.g. HN for food queries).
-_SECTOR_PROVIDERS: dict[str, list] = {
-    "tech": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_hn_algolia, _search_github_api,
-        _search_reddit_api, _search_arxiv_api, _search_youtube,
-    ],
-    "food": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api,
-        _search_nominatim, _search_youtube,
-    ],
-    "travel": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api,
-        _search_nominatim, _search_youtube,
-    ],
-    "shopping": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api,
-    ],
-    "health": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api, _search_youtube,
-    ],
-    "academic": [
-        _search_arxiv_api, _search_wikipedia_api,
-        _search_duckduckgo_html, _search_via_jina_reader, _search_youtube,
-    ],
-    "entertainment": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api, _search_youtube,
-    ],
-    "news": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_hn_algolia,
-    ],
-    "general": [
-        _search_duckduckgo_html, _search_via_jina_reader,
-        _search_reddit_api, _search_wikipedia_api, _search_youtube,
-    ],
-}
-
-
-def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[SearchResult]:
-    """Search the web with sector-aware provider routing.
-
-    The query is classified into a sector (tech, food, travel, shopping,
-    health, academic, entertainment, news, or general), and only the
-    providers relevant to that sector are queried in parallel.  This
-    eliminates noise — HN/GitHub/arXiv are only queried for tech queries,
-    Nominatim (OpenStreetMap) only for food/travel queries, etc.
-
-    Results are **interleaved by source** for maximum diversity.
+    Args:
+        query: Search query.
+        max_results: Maximum number of results to return.
+        timeout: Overall timeout per provider.
+        prefer: List of provider names to bump in priority.
+        exclude: List of provider names to skip.
+        context: Optional context for ranking (reserved).
 
     Returns a deduplicated list of up to ``max_results`` SearchResult items.
 
@@ -1959,54 +1854,15 @@ def search_web(query: str, *, max_results: int = 8, timeout: int = 20) -> list[S
         NoResults: If no results were returned by any provider.
         Timeout: If all providers timed out.
     """
-    sector = _classify_sector(query)
-    providers = _SECTOR_PROVIDERS.get(sector, _SECTOR_PROVIDERS["general"])
-
-    # Collect results from all providers in parallel
-    all_items: list[SearchResult] = []
-    saw_timeout = False
-    seen = set()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
-        futs = [pool.submit(p, query, max_results, timeout) for p in providers]
-        for fut in concurrent.futures.as_completed(futs):
-            try:
-                for item in fut.result():
-                    key = _canonical_url(item.url)
-                    if key and key not in seen:
-                        seen.add(key)
-                        all_items.append(item)
-            except Exception as exc:
-                # Track timeouts for structured error reporting
-                exc_name = type(exc).__name__.lower()
-                if "timeout" in exc_name or "timed out" in str(exc).lower():
-                    saw_timeout = True
-                continue
-
-    if not all_items:
-        if saw_timeout:
-            raise Timeout(
-                f"All search providers timed out for query: {query[:80]}",
-                timeout=timeout,
-            )
-        raise NoResults(
-            f"No search results found for query: {query[:80]}",
-            query=query,
-        )
-
-    # Interleave results by source for maximum diversity
-    by_source: dict[str, list[SearchResult]] = {}
-    for item in all_items:
-        src = item.source or "unknown"
-        by_source.setdefault(src, []).append(item)
-
-    interleaved: list[SearchResult] = []
-    while any(by_source.values()):
-        for src in list(by_source.keys()):
-            if by_source.get(src):
-                interleaved.append(by_source[src].pop(0))
-                if len(interleaved) >= max_results:
-                    return interleaved
-    return interleaved
+    from agentweb.engine.search import search_providers
+    return search_providers(
+        query,
+        max_results=max_results,
+        timeout=timeout,
+        prefer=prefer,
+        exclude=exclude,
+        context=context,
+    )
 
 
 def _search_stackexchange_api(query: str, max_results: int, timeout: int) -> list[SearchResult]:
@@ -2057,22 +1913,16 @@ def _search_stackexchange_api(query: str, max_results: int, timeout: int) -> lis
     return results[:max_results]
 
 
+from agentweb.engine.providers import PROVIDER_REGISTRY
+
 _SEARCH_PROVIDERS: dict[str, list] = {
-    "duckduckgo": [_search_duckduckgo_html],
-    "hackernews": [_search_hn_algolia],
-    "arxiv": [_search_arxiv_api],
-    "wikipedia": [_search_wikipedia_api],
-    "reddit": [_search_reddit_api, _search_reddit_site],
-    "github": [_search_github_api],
-    "nominatim": [_search_nominatim],
-    "twitter": [_search_twitter_site],
-    "youtube": [_search_youtube],
-    "xcom": [_search_twitter_site],
-    "bing": [_search_via_jina_reader],
-    "jina": [_search_jina_general],
-    "stackexchange": [_search_stackexchange_api],
-    "general": [_search_duckduckgo_html, _search_via_jina_reader, _search_hn_algolia, _search_reddit_api, _search_stackexchange_api],
+    name: [provider.search] for name, provider in PROVIDER_REGISTRY.items()
 }
+# Aliases
+if "twitter" in _SEARCH_PROVIDERS:
+    _SEARCH_PROVIDERS["xcom"] = _SEARCH_PROVIDERS["twitter"]
+if "jina" in _SEARCH_PROVIDERS:
+    _SEARCH_PROVIDERS["bing"] = _SEARCH_PROVIDERS["jina"]
 
 
 def search_by_provider(
@@ -2128,103 +1978,4 @@ def search_by_provider(
 # TF-IDF NOVELTY SCORING  (used by SDK already_knows parameter)
 # ═══════════════════════════════════════════════════════════════════
 
-_RE_SHORT_TOKEN = re.compile(r"[a-zA-Z0-9]{3,}")
-
-
-def compute_novelty_scores(
-    already_knows: list[str],
-    result_texts: list[str],
-) -> list[float]:
-    """Compute TF-IDF novelty scores for each result vs ``already_knows`` texts.
-
-    Algorithm
-    ---------
-    1. Compute **TF** (raw term counts) for each term across all ``already_knows``
-       texts.
-    2. Compute **IDF** using ``log(N / df)`` where *N* is the number of result
-       texts and *df* is the number of result texts containing the term.
-    3. Build **TF-IDF vectors** (``tf * idf``) for the already-knows text and
-       for each result, then L2-normalise each vector to unit length.
-    4. **overlap_score** = cosine similarity (dot product) between the
-       normalised already-knows TF-IDF vector and each normalised result
-       TF-IDF vector.
-    5. **novel_score** = ``1 - overlap_score``.
-
-    Returns
-    -------
-    list[float]
-        One novelty score per result (0.0 = identical to already-known content,
-        1.0 = completely novel / no overlap).
-
-    Notes
-    -----
-    - Terms shorter than 3 characters are ignored.
-    - If ``already_knows`` is empty or all result texts are empty, every result
-      gets a novelty score of 1.0 (fully novel).
-    """
-    if not already_knows or not result_texts:
-        return [1.0] * len(result_texts)
-
-    # ── 1. Tokenise & build term-frequency dicts ───────────────────────
-    known_tokens = [t.lower() for t in _RE_SHORT_TOKEN.findall(" ".join(already_knows))]
-    if not known_tokens:
-        return [1.0] * len(result_texts)
-
-    known_tf: dict[str, int] = {}
-    for t in known_tokens:
-        known_tf[t] = known_tf.get(t, 0) + 1
-
-    result_tfs: list[dict[str, int]] = []
-    for text in result_texts:
-        tokens = [t.lower() for t in _RE_SHORT_TOKEN.findall(text)]
-        tf: dict[str, int] = {}
-        for t in tokens:
-            tf[t] = tf.get(t, 0) + 1
-        result_tfs.append(tf)
-
-    # All unique terms across known + all results
-    all_terms: set[str] = set(known_tf)
-    for rt in result_tfs:
-        all_terms.update(rt)
-
-    # ── 2. IDF across the result corpus ────────────────────────────────
-    N = len(result_tfs)
-    doc_freq: dict[str, int] = {}
-    for rt in result_tfs:
-        for term in rt:
-            doc_freq[term] = doc_freq.get(term, 0) + 1
-
-    # ── 3. TF-IDF vectors (L2-normalised) ──────────────────────────────
-    def _tfidf_vector(
-        tf: dict[str, int],
-        idf_weight: float = 1.0,
-    ) -> tuple[dict[str, float], float]:
-        """Build a TF-IDF vector and return (vector, L2-norm)."""
-        vec: dict[str, float] = {}
-        sq_sum = 0.0
-        for term, raw_tf in tf.items():
-            idf = doc_freq.get(term, 0)
-            # Add-one-smoothed IDF: 1 + log(N / df) guarantees idf >= 1
-            # for any present term, while rare terms get higher weight.
-            w = idf_weight * (1.0 + math.log(N / idf)) if idf > 0 else 0.0
-            val = raw_tf * w
-            vec[term] = val
-            sq_sum += val * val
-        return vec, math.sqrt(sq_sum) if sq_sum > 0 else 1.0
-
-    known_vec, known_norm_v = _tfidf_vector(known_tf)
-
-    scores: list[float] = []
-    for rt_tf in result_tfs:
-        res_vec, res_norm_v = _tfidf_vector(rt_tf)
-
-        # Cosine similarity
-        dot = sum(
-            known_vec.get(t, 0.0) * res_vec.get(t, 0.0)
-            for t in all_terms
-        )
-        overlap = dot / (known_norm_v * res_norm_v) if known_norm_v * res_norm_v > 0 else 0.0
-        overlap = max(0.0, min(1.0, overlap))
-        scores.append(1.0 - overlap)
-
-    return scores
+from agentweb.engine.rank import compute_novelty_scores

@@ -4,13 +4,6 @@ AgentWeb Deep Research — NO LLM ARCHITECTURE
 Inspired by: Claude (orchestrator-worker), ChatGPT (plan-then-execute), Perplexity (iterative refine).
 Constraint: Zero LLM API calls inside AgentWeb. All reasoning is classical NLP + graph algorithms.
 
-Semantic Routing (new in 0.1.7):
-  Uses SemanticRouter to classify queries into provider categories (arXiv, HN,
-  Wikipedia, Reddit) via term-overlap scoring with multi-word phrase bonuses.
-  Falls back to general web search (Jina Search API + DuckDuckGo) when no
-  category scores above the 0.10 threshold — fixing the "H1 centro americano
-  coffee" class of failures where keyword-only routing returned nothing.
-
 This module lives at agentweb/deep_research.py and is imported by cli.py.
 """
 
@@ -31,7 +24,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, NamedTuple
 
 # AgentWeb's own imports
-from agentweb.core import fetch_url, search_by_provider, search_web, FetchResult, SearchResult, compute_novelty_scores
+from agentweb.core import fetch_url, search_by_provider, search_web, FetchResult, SearchResult
+from agentweb.engine.rank import compute_bm25_scores, compute_novelty_scores
+from agentweb.engine.search import search_providers
 from agentweb.authenticity import ContentAuthenticity
 from agentweb.safety import InputGuard
 
@@ -122,179 +117,6 @@ _RE_STOP_WORDS = re.compile(
     re.I,
 )
 _RE_WHITESPACE = re.compile(r"\s+")
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SEMANTIC ROUTER — classify queries into provider categories
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class SemanticRouter:
-    """Classify queries into search provider categories using term-overlap scoring.
-
-    Zero external dependencies — uses token overlap + phrase matching between the
-    query and each category's seed profile.  If no category scores above the
-    fallback threshold, routes to ``"general"`` web search.
-
-    Design:
-    - **Single-word seeds** matched against query tokens (2+ chars, no stopwords)
-    - **Multi-word seeds** matched as exact substrings against the query
-    - Short meaningful tokens (``hn``, ``ai``, ``yc``) are captured by the 2-char
-      minimum — common English 2-letter words are in the stopword list.
-    """
-
-    # Custom short-token regex: 2+ chars (3+ is too restrictive for HN, AI, YC, etc.)
-    _RE_TOKEN = re.compile(r"[a-zA-Z0-9]{2,}")
-
-    # Seed terms per provider category.
-    # Single words: matched against query tokens (2+ chars, filtered).
-    # Multi-word phrases: matched exactly against query (substring check).
-    CATEGORY_SEEDS: dict[str, set[str]] = {
-        "arxiv": {
-            "paper", "research", "study", "academic", "preprint",
-            "publication", "scientific", "scholar", "doi", "proceedings",
-            "conference", "journal", "experiment", "methodology",
-            "benchmark", "dataset", "novel", "theory", "algorithm",
-            "sota", "pretrained", "fine", "tune", "architecture", "corpus",
-            "llm", "transformer", "nlp",
-            "state of the art", "we propose", "results show",
-            "empirical", "evaluation", "neural network",
-            "deep learning", "computer vision", "reinforcement learning",
-            "machine learning",
-        },
-        "hackernews": {
-            "hackernews", "startup", "founder", "venture", "launch",
-            "bootstrapped", "indie", "postmortem", "pivot",
-            "ycombinator",
-            "hacker news", "y combinator",
-            "series a", "side project", "build in public",
-            "tech crunch", "startup school", "seed round",
-            "show hn", "ask hn", "hn",
-        },
-        "wikipedia": {
-            "history", "definition", "overview", "background",
-            "meaning", "explain", "define", "origin", "etymology",
-            "biography", "geography", "capital", "population",
-            "timeline", "concept", "terminology", "located", "born",
-            "founded", "demographics", "country", "continent",
-            "what is", "who is", "where is", "also known as",
-        },
-        "reddit": {
-            "reddit", "subreddit", "opinion", "opinions",
-            "review", "reviews", "recommendation", "recommendations",
-            "recommend", "discussion", "discussions", "advice",
-            "troubleshooting", "suggestion", "suggestions",
-            "ama", "eli5", "tifu", "aita",
-            "anyone else", "thoughts on", "what do you think",
-            "does anyone", "has anyone", "experience with",
-            "worth it", "is it good", "should i buy",
-            "worth", "buy", "rating",
-        },
-        "twitter": {
-            "twitter", "xcom", "tweet", "announcement", "breaking",
-            "trending", "viral", "elon", "musk",
-            "just announced", "as of", "thread:",
-            "https://x.com/", "https://twitter.com/",
-            "whats happening", "latest news",
-        },
-        "github": {
-            "github", "repository", "repo", "open source",
-            "library", "framework", "tool", "package",
-            "implementation", "pypi", "npm", "crates",
-            "source code", "api wrapper", "cli tool",
-            "docker image", "plugin", "extension",
-            "github repo", "github project",
-        },
-    }
-
-    # Common English words that shouldn't count as meaningful matches
-    _STOPWORDS: frozenset[str] = frozenset({
-        "the", "and", "for", "are", "but", "not", "you", "all", "can",
-        "was", "one", "our", "out", "get", "has", "him", "his", "how",
-        "its", "may", "new", "now", "old", "see", "two", "way", "who",
-        "did", "she", "use", "via", "that", "from", "have", "been",
-        "were", "said", "also", "they", "this", "what", "than",
-        "with", "their", "about", "into", "over", "after", "some",
-        "more", "most", "much", "many", "very", "just", "like",
-        "do", "it", "is", "be", "to", "of", "in", "on", "at",
-        "by", "as", "an", "or", "if", "so", "up", "no", "we",
-        "he", "she", "my", "me", "go", "am", "pm",
-    })
-
-    _GENERAL_FALLBACK_THRESHOLD = 0.10
-
-    @classmethod
-    def _tokenize(cls, text: str) -> set[str]:
-        """Extract meaningful tokens (2+ chars, no stopwords)."""
-        return {m.group().lower() for m in cls._RE_TOKEN.finditer(text)
-                if m.group().lower() not in cls._STOPWORDS}
-
-    def classify(self, query: str) -> list[tuple[str, float]]:
-        """Classify a query into provider categories.
-
-        Returns a list of ``(provider_name, confidence)`` pairs sorted by
-        confidence descending.  ``"general"`` is always included as a
-        last-resort provider.
-        """
-        query_lower = query.lower()
-        tokens = self._tokenize(query_lower)
-        num_tokens = len(tokens)
-
-        if not tokens:
-            return [("general", 1.0)]
-
-        scores: list[tuple[str, float]] = []
-        for provider, seeds in self.CATEGORY_SEEDS.items():
-            word_hits = 0
-            phrase_hits = 0
-
-            for seed in seeds:
-                seed_lower = seed.lower()
-                if " " in seed:
-                    # Multi-word seed: exact phrase match
-                    if seed_lower in query_lower:
-                        phrase_hits += 1
-                else:
-                    # Single-word seed: token match
-                    if len(seed_lower) >= 2 and seed_lower not in self._STOPWORDS:
-                        if seed_lower in tokens:
-                            word_hits += 1
-
-            # Score: fraction of query tokens matched + capped phrase bonus
-            word_frac = word_hits / num_tokens
-            phrase_frac = min(phrase_hits, 3) / 3  # capped at 3 phrases
-
-            # Weighted: words 60%, phrases 40%
-            total = min(word_frac * 0.6 + phrase_frac * 0.4, 1.0)
-            scores.append((provider, round(total, 4)))
-
-        # Sort by confidence desc
-        scores.sort(key=lambda x: x[1], reverse=True)
-
-        # Below threshold -> route purely to general web search
-        if scores[0][1] < self._GENERAL_FALLBACK_THRESHOLD:
-            return [("general", 1.0)]
-
-        # Return all providers within 30% of the top score
-        top_score = scores[0][1]
-        result = [(p, s) for p, s in scores if s >= top_score * 0.3]
-
-        # Always append general as a co-provider for safety
-        if not any(p == "general" for p, _ in result):
-            result.append(("general", self._GENERAL_FALLBACK_THRESHOLD))
-
-        return result
-_ROUTER = SemanticRouter()  # module-level singleton
-
-
-def semantic_route_providers(query: str) -> list[str]:
-    """Route a query to providers using the SemanticRouter.
-
-    Returns a deduplicated list of provider names ordered by confidence.
-    Always includes a general web search fallback.
-    """
-    classified = _ROUTER.classify(query)
-    return [p for p, _ in classified]
-
 
 def _simplify_query(query: str) -> str:
     """Strip leading question words and trailing '?' from a query.
@@ -535,21 +357,9 @@ def decompose_query(query: str) -> QueryPlan:
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PHASE 2 — SEARCH PROVIDER ROUTING  (zero LLM)
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Known provider specializations (no LLM needed — just a domain map)
-PROVIDER_TAGS: dict[str, list[str]] = {
-    "duckduckgo": ["general", "news", "products", "factual", "interrogative", "list"],
-    "hackernews": ["technology", "startups", "product", "discussion", "general"],
-    "wikipedia": ["factual", "background", "history", "definition", "overview"],
-    "arxiv": ["research", "academic", "technical", "paper", "science", "algorithm"],
-    "reddit": ["discussion", "opinion", "experience", "review", "comparison"],
-    "twitter": ["news", "announcement", "trending", "breaking", "realtime", "general"],
-    "github": ["technical", "tool", "library", "implementation", "open_source", "code"],
-    "google": ["general", "news", "products", "factual"],
-}
+# ═════════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — SEARCH  (zero LLM)
+# ═════════════════════════════════════════════════════════════════════════════════
 
 # Domain → canonical name mapping for known high-authority sources
 AUTHORITATIVE_DOMAINS: dict[str, float] = {
@@ -570,44 +380,29 @@ AUTHORITATIVE_DOMAINS: dict[str, float] = {
     "economist.com": 1.3,
 }
 
-
-def route_providers(query: str, intent: str) -> list[str]:
-    """Pick the best providers for this query.
-
-    Uses the SemanticRouter to classify the query by term overlap with
-    each category's seed profile.  Falls back to intent-based heuristics
-    when semantic confidence is low.
-
-    Always includes a general web search provider as a safety net.
-    """
-    # Semantic classification
-    semantic = _ROUTER.classify(query)
-
-    # Extract provider names sorted by confidence
-    providers: list[str] = []
-    seen: set[str] = set()
-    for provider, confidence in semantic:
-        if provider not in seen:
-            seen.add(provider)
-            providers.append(provider)
-
-    # If semantic only gave "general", supplement with intent-based hints
-    if providers == ["general"]:
-        if intent in ("factual", "interrogative"):
-            providers.append("wikipedia")
-        if intent in ("list", "comparison"):
-            providers.append("reddit")
-        if any(t in query.lower() for t in ["paper", "research", "academic", "science", "arxiv"]):
-            providers.append("arxiv")
-        if any(t in query.lower() for t in ["startup", "hacker", "tech", "launch"]):
-            providers.append("hackernews")
-
-    return list(dict.fromkeys(providers))  # deduplicate preserving order
+# Intent-to-provider-hint mapping for per-branch source preference
+_INTENT_HINTS: dict[str, dict[str, list[str]]] = {
+    "direct_comparison": {"prefer": ["reddit", "hackernews", "stackexchange"]},
+    "entity1_focused": {"prefer": ["github", "wikipedia", "stackexchange"]},
+    "entity2_focused": {"prefer": ["github", "wikipedia", "stackexchange"]},
+    "pros_cons": {"prefer": ["reddit", "hackernews"]},
+    "original": {"prefer": [], "exclude": []},
+    "background": {"prefer": ["wikipedia"]},
+    "current_status": {"prefer": ["news", "reddit"]},
+    "details": {"prefer": ["github", "stackexchange", "wikipedia"]},
+    "alternatives": {"prefer": ["reddit", "hackernews", "github"]},
+    "benchmarks": {"prefer": ["github", "stackexchange"]},
+}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+def _intent_to_hints(intent: str) -> dict[str, list[str]]:
+    """Map a SubQuery intent to provider preference hints."""
+    return _INTENT_HINTS.get(intent, {"prefer": [], "exclude": []})
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 3 — PARALLEL SUBAGENTS  (zero LLM, threads instead of LLMs)
-# ═══════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class SubAgentResult:
@@ -802,8 +597,19 @@ def _detect_knowledge_gaps(query_text: str, fetched: list[FetchResult]) -> list[
     # Extract meaningful terms from the query (skip stopwords, short tokens)
     query_tokens = {t.lower() for t in _RE_TERM_TOKEN.findall(query_text)}
     # Filter out very common/generic terms
-    stopwords = _ROUTER._STOPWORDS | frozenset({
-        "use", "using", "used", "get", "make", "way", "thing", "things",
+    stopwords = frozenset({
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "must", "shall", "can", "need", "dare",
+        "ought", "used", "to", "of", "in", "for", "on", "with", "at", "by",
+        "from", "as", "into", "through", "during", "before", "after",
+        "above", "below", "between", "under", "again", "further", "then",
+        "once", "here", "there", "when", "where", "why", "how", "all",
+        "each", "few", "more", "most", "other", "some", "such", "no", "nor",
+        "not", "only", "own", "same", "so", "than", "too", "very", "just",
+        "and", "but", "if", "or", "because", "until", "while", "about",
+        "against", "down", "out", "off", "over", "under", "again", "up",
+        "use", "using", "get", "make", "way", "thing", "things",
         "like", "well", "also", "one", "two", "first", "second", "last",
         "new", "many", "much", "more", "most", "need", "want", "know",
     })
@@ -888,7 +694,6 @@ def _suggest_followups(query_text: str, knowledge_gaps: list[dict[str, Any]]) ->
 
 def run_subagent(
     sub_query: SubQuery,
-    providers: list[str],
     timeout: int = 20,
     max_chars: int = 4000,
 ) -> SubAgentResult:
@@ -903,6 +708,11 @@ def run_subagent(
       reference links and fetches the highest-scored ones
     """
     warnings = []
+
+    # Generate per-branch provider hints from intent
+    hints = _intent_to_hints(sub_query.intent)
+    prefer_hints = hints.get("prefer", [])
+    exclude_hints = hints.get("exclude", [])
 
     # ── Multi-query expansion (generates 3 query variants per branch) ──
     queries_to_search = [sub_query.text]
@@ -937,23 +747,28 @@ def run_subagent(
     if len(queries_to_search) > 1:
         warnings.append(f"query_expansion:expanded_to_{len(queries_to_search)}_variants")
 
-    # 1. Search all query variants across all routed providers
+    # 1. Search all query variants via search_providers (all registered providers in parallel)
     all_results: list[SearchResult] = []
     for search_query in queries_to_search:
-        for provider in providers[:3]:  # cap at 3 providers per sub-agent
-            try:
-                results = search_by_provider(provider, search_query, max_results=5, timeout=timeout)
-                all_results.extend(results)
-            except Exception as exc:
-                if not any(f"provider_{provider}_error" in w for w in warnings):
-                    warnings.append(f"provider_{provider}_error:{type(exc).__name__}")
+        try:
+            results = search_providers(
+                search_query, max_results=5, timeout=timeout,
+                prefer=prefer_hints, exclude=exclude_hints,
+            )
+            all_results.extend(results)
+        except Exception as exc:
+            if not any("search_providers_error" in w for w in warnings):
+                warnings.append(f"search_providers_error:{type(exc).__name__}")
 
-    # ── Zero-result fallback chain ──────────────────────────────────────
+    # ── Zero-result fallback chain ──────────────────────────────────────────────────────────────
     if not all_results:
         keyword_q = _extract_keywords(sub_query.text)
         if keyword_q and keyword_q not in queries_to_search:
             try:
-                kw_results = search_by_provider("general", keyword_q, max_results=5, timeout=timeout)
+                kw_results = search_providers(
+                    keyword_q, max_results=5, timeout=timeout,
+                    prefer=prefer_hints, exclude=exclude_hints,
+                )
                 if kw_results:
                     all_results.extend(kw_results)
                     warnings.append(f"keyword_fallback:used '{keyword_q}'")
@@ -962,7 +777,10 @@ def run_subagent(
 
     if not all_results:
         try:
-            jina_results = search_by_provider("jina", sub_query.text, max_results=5, timeout=timeout)
+            jina_results = search_providers(
+                sub_query.text, max_results=5, timeout=timeout,
+                prefer=prefer_hints, exclude=exclude_hints,
+            )
             if jina_results:
                 all_results.extend(jina_results)
                 warnings.append("jina_fallback:used Jina Search")
@@ -975,7 +793,10 @@ def run_subagent(
         if len(kw_parts) > 3:
             short_q = " ".join(kw_parts[:4])
             try:
-                hn_results = search_by_provider("general", short_q, max_results=5, timeout=timeout)
+                hn_results = search_providers(
+                    short_q, max_results=5, timeout=timeout,
+                    prefer=prefer_hints, exclude=exclude_hints,
+                )
                 if hn_results:
                     all_results.extend(hn_results)
                     warnings.append(f"factual_short_fallback:used '{short_q}'")
@@ -1104,55 +925,6 @@ class ScoredSource:
     coverage_boost: float
     total_score: float
     novel_score: float = 1.0
-
-
-class BM25Scorer:
-    """
-    Classic BM25 ranking — no LLM needed.
-    Standard: Okapi BM25 with k1=1.5, b=0.75.
-    """
-
-    def __init__(self, k1: float = 1.5, b: float = 0.75):
-        self.k1 = k1
-        self.b = b
-
-    def _tokenize(self, text: str) -> list[str]:
-        return [t.lower() for t in _RE_TERM_TOKEN.findall(text)]
-
-    def _avgdl(self, corpus: list[list[str]]) -> float:
-        total = sum(len(doc) for doc in corpus)
-        return total / len(corpus) if corpus else 0
-
-    def score(self, query: str, documents: list[str]) -> list[float]:
-        """
-        Returns BM25 scores for each document relative to the query.
-        """
-        query_terms = self._tokenize(query)
-        docs_tok = [self._tokenize(d) for d in documents]
-        avgdl = self._avgdl(docs_tok)
-        N = len(documents)
-
-        scores = []
-        for doc_tok in docs_tok:
-            score = 0.0
-            doc_len = len(doc_tok)
-            term_freq: dict[str, int] = collections.Counter(doc_tok)
-            doc_freq: dict[str, int] = {}
-            for term in set(doc_tok):
-                doc_freq[term] = 1  # simplified: treat as appearing in this doc only
-
-            for term in query_terms:
-                tf = term_freq.get(term, 0)
-                if tf == 0:
-                    continue
-                # df: number of docs containing term (simplified single-doc version)
-                df = 1
-                idf = math.log((N - df + 0.5) / (df + 0.5) + 1)
-                numerator = tf * (self.k1 + 1)
-                denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / (avgdl + 1e-6))
-                score += idf * (numerator / (denominator + 1e-6))
-            scores.append(score)
-        return scores
 
 
 def _authority_boost(url: str) -> float:
@@ -1336,8 +1108,7 @@ def rank_sources(
 
     documents = [fr.text or "" for fr, _, _ in all_fetched]
     enrich_query = f"{query} {intent}"
-    bm25 = BM25Scorer()
-    bm25_scores = bm25.score(enrich_query, documents)
+    bm25_scores = compute_bm25_scores(enrich_query, documents)
 
     # Classify source types for diversity scoring
     source_types: dict[str, int] = {}
@@ -2128,7 +1899,6 @@ def refine_with_additional_search(
     extra_results: list[SubAgentResult] = []
 
     for eq in expanded[:2]:  # max 2 extra branches
-        providers = route_providers(eq, plan.intent)
         sq = SubQuery(
             id=f"refine_{len(initial_sub_results) + len(extra_results)}",
             text=eq,
@@ -2136,7 +1906,7 @@ def refine_with_additional_search(
             weight=0.3,
             parent_terms={t.lower() for t in _RE_TERM_TOKEN.findall(eq)},
         )
-        extra_results.append(run_subagent(sq, providers, timeout=timeout))
+        extra_results.append(run_subagent(sq, timeout=timeout))
 
     return initial_sub_results + extra_results
 
@@ -2156,6 +1926,7 @@ def _deep_research_stream(
     refine: str | None = None,
     guard: InputGuard | None = None,
     already_knows: list[str] | None = None,
+    context: Any = None,
 ) -> Iterable[dict[str, Any]]:
     """Generator that runs the full deep research pipeline but yields
     intermediate phase dicts so callers can consume progress incrementally.
@@ -2183,7 +1954,6 @@ def _deep_research_stream(
 
     # 1. Query decomposition
     plan = decompose_query(effective_query)
-    providers = route_providers(effective_query, plan.intent)
     branch_count = plan.branch_count
     sys.stderr.write(f"Deep research: decomposed into {branch_count} branch(es) (intent: {plan.intent})\n")
     sys.stderr.flush()
@@ -2201,7 +1971,7 @@ def _deep_research_stream(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=branch_count) as pool:
         fut_map = {
-            pool.submit(run_subagent, sq, providers, timeout, max_chars): sq
+            pool.submit(run_subagent, sq, timeout, max_chars): sq
             for sq in plan.sub_queries
         }
         completed = 0
@@ -2394,7 +2164,6 @@ def deep_research(
 
     # 1. Query decomposition
     plan = decompose_query(effective_query)
-    providers = route_providers(effective_query, plan.intent)
     branch_count = plan.branch_count
     sys.stderr.write(f"Deep research: decomposed into {branch_count} branch(es) (intent: {plan.intent})\n")
     sys.stderr.flush()
@@ -2403,7 +2172,7 @@ def deep_research(
     completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=branch_count) as pool:
         fut_map = {
-            pool.submit(run_subagent, sq, providers, timeout, max_chars): sq
+            pool.submit(run_subagent, sq, timeout, max_chars): sq
             for sq in plan.sub_queries
         }
         sub_results: list[SubAgentResult] = []

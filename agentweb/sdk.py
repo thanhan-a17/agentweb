@@ -16,12 +16,12 @@ from agentweb.core import (
     FetchResult,
     SearchResult,
     _now,
-    compute_novelty_scores,
     fetch_url,
     research as _research,
     search_by_provider,
     search_web,
 )
+from agentweb.engine.rank import compute_novelty_scores
 from agentweb.deep_research import _deep_research_stream
 from agentweb.errors import AgentWebError, NoResults, ValidationError, map_exception
 from agentweb.safety import InputGuard
@@ -164,8 +164,28 @@ class AgentWeb:
         max_results: int = 8,
         timeout: int = 20,
         already_knows: list[str] | None = None,
+        prefer: list[str] | None = None,
+        exclude: list[str] | None = None,
+        context: Any = None,
     ) -> dict[str, Any]:
         """Search the web with resilient no-key providers.
+
+        Parameters
+        ----------
+        query : str
+            Search query.
+        max_results : int
+            Maximum number of results.
+        timeout : int
+            Request timeout in seconds.
+        already_knows : list[str] | None
+            Texts the agent already knows; used for TF-IDF novelty scoring.
+        prefer : list[str] | None
+            Provider names to prefer.
+        exclude : list[str] | None
+            Provider names to exclude.
+        context : Any
+            Optional context (ignored, reserved).
 
         Returns a dict with ``results``, ``query``, and ``meta``.
         """
@@ -175,6 +195,9 @@ class AgentWeb:
                 query,
                 max_results=max_results,
                 timeout=timeout,
+                prefer=prefer,
+                exclude=exclude,
+                context=context,
             )
             result_dicts = [r.to_dict() for r in results]
 
@@ -255,6 +278,7 @@ class AgentWeb:
         refine: str = "",
         exclude_sources: list[str] | None = None,
         already_knows: list[str] | None = None,
+        context: Any = None,
     ) -> dict[str, Any]:
         """Search + fetch top sources and emit an agent-ready evidence pack.
 
@@ -271,6 +295,7 @@ class AgentWeb:
                 max_chars=max_chars,
                 refine=refine,
                 exclude_sources=exclude_sources,
+                context=context,
             )
             # Combine search_results + sources for meta computation
             all_results = (pack.get("search_results") or []) + (pack.get("sources") or [])
@@ -312,6 +337,7 @@ class AgentWeb:
         refinement_loops: int = 0,
         refine: str | None = None,
         already_knows: list[str] | None = None,
+        context: Any = None,
     ) -> Iterator[dict[str, Any]]:
         """Streaming deep research pipeline.
 
@@ -342,6 +368,7 @@ class AgentWeb:
                 refinement_loops=refinement_loops,
                 refine=refine,
                 already_knows=already_knows,
+                context=context,
             )
         except Exception as exc:
             raise _maybe_wrap(exc, tool="deep_research") from exc
@@ -356,6 +383,7 @@ class AgentWeb:
         refinement_loops: int = 0,
         refine: str | None = None,
         already_knows: list[str] | None = None,
+        context: Any = None,
     ) -> dict[str, Any]:
         """Multi-branch deep research pipeline (zero LLM).
 
@@ -385,6 +413,7 @@ class AgentWeb:
                 refinement_loops=refinement_loops,
                 refine=refine,
                 already_knows=already_knows,
+                context=context,
             ):
                 if chunk["phase"] == "complete":
                     report = chunk["report"]
@@ -429,6 +458,23 @@ class AgentWeb:
                                 "type": "integer",
                                 "description": "Timeout in seconds for each request (default: 20).",
                                 "default": 20,
+                            },
+                            "prefer": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional list of provider names to prefer.",
+                                "default": [],
+                            },
+                            "exclude": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional list of provider names to exclude.",
+                                "default": [],
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Optional context string (ignored, reserved for future use).",
+                                "default": "",
                             },
                         },
                         "required": ["query"],
