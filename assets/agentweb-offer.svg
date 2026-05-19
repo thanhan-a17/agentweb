@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 460" fill="none">
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#fff" stop-opacity="0.08"/>
+      <stop offset="50%" stop-color="#fff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="460" fill="#000"/>
+
+  <!-- Grid -->
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#fff" stroke-width="0.5" stroke-opacity="0.03"/>
+  </pattern>
+  <rect width="800" height="460" fill="url(#grid)"/>
+
+  <!-- Subtle glow behind title -->
+  <ellipse cx="400" cy="40" rx="200" ry="60" fill="#fff" opacity="0.03"/>
+
+  <!-- Title -->
+  <text x="400" y="48" text-anchor="middle" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="28" font-weight="700" letter-spacing="-0.5">AgentWeb</text>
+  <text x="400" y="74" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="14">Web access for AI agents. No API keys. No AI bills.</text>
+
+  <!-- Badge row -->
+  <rect x="270" y="90" width="260" height="24" rx="12" fill="#fff" fill-opacity="0.04" stroke="#fff" stroke-width="0.5" stroke-opacity="0.1"/>
+  <text x="400" y="107" text-anchor="middle" fill="#888" font-family="system-ui,-apple-system,sans-serif" font-size="12">12+ free providers · 0 API keys · 0 AI costs</text>
+
+  <!-- Divider -->
+  <rect x="40" y="136" width="720" height="1" fill="#fff" fill-opacity="0.06"/>
+
+  <!-- Feature Cards -->
+  <g>
+    <!-- Card 1: Search -->
+    <rect x="40" y="156" width="170" height="138" rx="8" fill="#fff" fill-opacity="0.02" stroke="#fff" stroke-width="0.5" stroke-opacity="0.08"/>
+    <text x="56" y="182" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="13" font-weight="600">Search</text>
+    <text x="56" y="206" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">Fire all 12+ providers in</text>
+    <text x="56" y="222" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">parallel. Short-circuit on</text>
+    <text x="56" y="238" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">enough results. BM25 +</text>
+    <text x="56" y="254" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">FlashRank semantic ranking.</text>
+    <!-- Tags -->
+    <rect x="56" y="268" width="66" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="89" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">DDG · GitHub</text>
+    <rect x="128" y="268" width="68" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="162" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">arXiv · Reddit</text>
+  </g>
+
+  <g>
+    <!-- Card 2: Fetch -->
+    <rect x="226" y="156" width="170" height="138" rx="8" fill="#fff" fill-opacity="0.02" stroke="#fff" stroke-width="0.5" stroke-opacity="0.08"/>
+    <text x="242" y="182" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="13" font-weight="600">Fetch</text>
+    <text x="242" y="206" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">Layered page extraction</text>
+    <text x="242" y="222" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">with auto-escalation:</text>
+    <text x="242" y="238" fill="#aaa" font-family="system-ui,-apple-system,sans-serif" font-size="11">Direct HTTP → Jina Reader</text>
+    <text x="242" y="254" fill="#aaa" font-family="system-ui,-apple-system,sans-serif" font-size="11">→ Stealth browser</text>
+    <rect x="242" y="268" width="70" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="277" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">Bot-block</text>
+    <rect x="318" y="268" width="64" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="350" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">Auth prof.</text>
+  </g>
+
+  <g>
+    <!-- Card 3: Research -->
+    <rect x="412" y="156" width="170" height="138" rx="8" fill="#fff" fill-opacity="0.02" stroke="#fff" stroke-width="0.5" stroke-opacity="0.08"/>
+    <text x="428" y="182" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="13" font-weight="600">Research</text>
+    <text x="428" y="206" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">Search + fetch + evidence</text>
+    <text x="428" y="222" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">extraction. Structured</text>
+    <text x="428" y="238" fill="#aaa" font-family="system-ui,-apple-system,sans-serif" font-size="11">coverage scores, knowledge</text>
+    <text x="428" y="254" fill="#aaa" font-family="system-ui,-apple-system,sans-serif" font-size="11">gaps, follow-up ideas.</text>
+    <rect x="428" y="268" width="66" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="461" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">Evidence</text>
+    <rect x="500" y="268" width="68" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="534" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">Quality</text>
+  </g>
+
+  <g>
+    <!-- Card 4: Deep Research -->
+    <rect x="598" y="156" width="162" height="138" rx="8" fill="#fff" fill-opacity="0.02" stroke="#fff" stroke-width="0.5" stroke-opacity="0.08"/>
+    <text x="614" y="182" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="13" font-weight="600">Deep Research</text>
+    <text x="614" y="206" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">Multi-branch query</text>
+    <text x="614" y="222" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="11">decomposition. 5 specialized</text>
+    <text x="614" y="238" fill="#aaa" font-family="system-ui,-apple-system,sans-serif" font-size="11">sub-agents. Contradiction</text>
+    <text x="614" y="254" fill="#aaa" font-family="system-ui,-apple-system,sans-serif" font-size="11">detection. Full report.</text>
+    <rect x="614" y="268" width="60" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="644" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">Zero LLM</text>
+    <rect x="680" y="268" width="66" height="18" rx="3" fill="#fff" fill-opacity="0.04"/>
+    <text x="713" y="281" text-anchor="middle" fill="#666" font-family="system-ui,-apple-system,sans-serif" font-size="9">A/B compare</text>
+  </g>
+
+  <!-- Divider -->
+  <rect x="40" y="314" width="720" height="1" fill="#fff" fill-opacity="0.06"/>
+
+  <!-- Bottom row: differentiators -->
+  <g>
+    <rect x="40" y="332" width="170" height="36" rx="4" stroke="#fff" stroke-width="0.5" stroke-opacity="0.06" fill="none"/>
+    <text x="52" y="346" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="500">No API keys</text>
+    <text x="52" y="360" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="9">12 free providers, zero keys</text>
+  </g>
+  <g>
+    <rect x="226" y="332" width="170" height="36" rx="4" stroke="#fff" stroke-width="0.5" stroke-opacity="0.06" fill="none"/>
+    <text x="238" y="346" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="500">No AI bills</text>
+    <text x="238" y="360" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="9">BM25 + FlashRank, no LLM costs</text>
+  </g>
+  <g>
+    <rect x="412" y="332" width="170" height="36" rx="4" stroke="#fff" stroke-width="0.5" stroke-opacity="0.06" fill="none"/>
+    <text x="424" y="346" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="500">Semantic ranking</text>
+    <text x="424" y="360" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="9">BM25 + FlashRank cross-encoder</text>
+  </g>
+  <g>
+    <rect x="598" y="332" width="162" height="36" rx="4" stroke="#fff" stroke-width="0.5" stroke-opacity="0.06" fill="none"/>
+    <text x="610" y="346" fill="#fff" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="500">Agent-native output</text>
+    <text x="610" y="360" fill="#555" font-family="system-ui,-apple-system,sans-serif" font-size="9">Structured JSON, provenance</text>
+  </g>
+
+  <!-- CLI hints row -->
+  <text x="400" y="395" text-anchor="middle" fill="#444" font-family="system-ui,-apple-system,sans-serif" font-size="11">
+    <tspan fill="#666">LLM-steerable</tspan>
+    <tspan fill="#444"> · </tspan>
+    <tspan fill="#999">--prefer github</tspan>
+    <tspan fill="#444"> · </tspan>
+    <tspan fill="#999">--exclude youtube</tspan>
+    <tspan fill="#444"> · </tspan>
+    <tspan fill="#999">--context</tspan>
+  </text>
+
+  <!-- Install command box (widened to fit) -->
+  <rect x="120" y="412" width="560" height="30" rx="6" fill="#fff" fill-opacity="0.03" stroke="#fff" stroke-width="0.5" stroke-opacity="0.06"/>
+  <text x="400" y="432" text-anchor="middle" fill="#777" font-family="system-ui,-apple-system,sans-serif" font-size="12" font-weight="500">curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/install.sh | bash</text>
+</svg>
