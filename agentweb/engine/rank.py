@@ -298,6 +298,7 @@ def rank_results(
     prefer: list[str] | None = None,
     exclude: list[str] | None = None,
     *,
+    context: str | None = None,
     max_candidates: int = 50,
     top_n: int = 20,
 ) -> list[dict]:
@@ -313,6 +314,9 @@ def rank_results(
         Optional list of domain substrings to boost (e.g. ["github.com"]).
     exclude:
         Optional list of domain substrings to drop entirely.
+    context:
+        Optional context string. Augments the query for BM25/FlashRank
+        scoring so results semantically relevant to the context rank higher.
     max_candidates:
         How many candidates to keep after the first BM25 pass.
     top_n:
@@ -328,6 +332,9 @@ def rank_results(
 
     prefer = [p.lower() for p in (prefer or [])]
     exclude = [e.lower() for e in (exclude or [])]
+
+    # Augment query with context for ranking bias
+    effective_query = f"{query} {context}".strip() if context else query
 
     # ── Build working items ──────────────────────────────────────────────
     items: list[RankResult] = []
@@ -368,7 +375,7 @@ def rank_results(
         try:
             # bm25s.tokenize expects a list of strings for the corpus
             corpus_tokens = bm25s.tokenize(documents, stopwords="en")
-            query_tokens = bm25s.tokenize([query], stopwords="en")
+            query_tokens = bm25s.tokenize([effective_query], stopwords="en")
             retriever = bm25s.BM25()
             retriever.index(corpus_tokens)
             # bm25s returns results, scores; we want scores for all docs
@@ -386,7 +393,7 @@ def rank_results(
 
     if not bm25_scores:
         fallback = _BM25Fallback()
-        bm25_scores = fallback.score(query, documents)
+        bm25_scores = fallback.score(effective_query, documents)
 
     for it, score in zip(items, bm25_scores):
         it.bm25_score = score
@@ -400,9 +407,9 @@ def rank_results(
     if flashrank_available:
         try:
             ranker = FlashRanker(model_name="ms-marco-MiniLM-L-12-v2")
-            # Build query-doc pairs
+            # Build query-doc pairs (use effective_query for context-aware reranking)
             pairs = [
-                {"query": query, "text": f"{c.title}\n{c.snippet}\n{c.text}"}
+                {"query": effective_query, "text": f"{c.title}\n{c.snippet}\n{c.text}"}
                 for c in candidates
             ]
             reranked = ranker.rerank(pairs)

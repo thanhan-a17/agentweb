@@ -696,6 +696,7 @@ def run_subagent(
     sub_query: SubQuery,
     timeout: int = 20,
     max_chars: int = 4000,
+    context: str | None = None,
 ) -> SubAgentResult:
     """
     A 'sub-agent' is just a thread. It searches, fetches, and extracts
@@ -753,7 +754,7 @@ def run_subagent(
         try:
             results = search_providers(
                 search_query, max_results=5, timeout=timeout,
-                prefer=prefer_hints, exclude=exclude_hints,
+                prefer=prefer_hints, exclude=exclude_hints, context=context,
             )
             all_results.extend(results)
         except Exception as exc:
@@ -767,7 +768,7 @@ def run_subagent(
             try:
                 kw_results = search_providers(
                     keyword_q, max_results=5, timeout=timeout,
-                    prefer=prefer_hints, exclude=exclude_hints,
+                    prefer=prefer_hints, exclude=exclude_hints, context=context,
                 )
                 if kw_results:
                     all_results.extend(kw_results)
@@ -1971,7 +1972,7 @@ def _deep_research_stream(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=branch_count) as pool:
         fut_map = {
-            pool.submit(run_subagent, sq, timeout, max_chars): sq
+            pool.submit(run_subagent, sq, timeout, max_chars, context=context): sq
             for sq in plan.sub_queries
         }
         completed = 0
@@ -2132,6 +2133,7 @@ def deep_research(
     refine: str | None = None,
     guard: InputGuard | None = None,
     already_knows: list[str] | None = None,
+    context: str | None = None,
 ) -> dict[str, Any]:
     """
     AgentWeb's deep research pipeline. Zero LLM calls.
@@ -2172,7 +2174,7 @@ def deep_research(
     completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=branch_count) as pool:
         fut_map = {
-            pool.submit(run_subagent, sq, timeout, max_chars): sq
+            pool.submit(run_subagent, sq, timeout, max_chars, context=context): sq
             for sq in plan.sub_queries
         }
         sub_results: list[SubAgentResult] = []

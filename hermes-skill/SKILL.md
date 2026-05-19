@@ -141,10 +141,10 @@ Query decomposition → parallel branch dispatch → BM25 ranking (via engine/ra
 | `--prefer [source...]` | ✅ Required | ❌ | ❌ | Bias toward specific providers. `--prefer github jina` when looking for code. |
 | `--exclude [source...]` | ✅ Required | ❌ | ❌ | Block noisy sources. `--exclude reddit youtube` cuts SEO spam by >50%. |
 
-**Why context is required:**
-- `search` without context → BM25 ranks against the raw query, which favors generic keyword matches
-- `research` without context → evidence extraction picks the most keyword-dense sentences, not the most relevant ones
-- `deep-research` without context → branch decomposition is vague, BM25 ranking across branches has no signal, and contradiction detection compares irrelevant claims
+**How `--context` works on each command:**
+- `search` — Context is injected into the BM25 query + FlashRank reranking via `rank_results()`. Results that match both your query and your context rank higher.
+- `research` — Context flows through `search_web()` → `search_providers()` → `rank_results()` to bias search ranking toward your focus area.
+- `deep-research` — Context reaches every `run_subagent()` call, which passes it to all `search_providers()` calls for per-branch ranking. Without it, BM25 scoring across branches has no semantic steer signal.
 
 A good context tells the engine: who you are, what you're researching, what kind of answer you want, and what to ignore.
 

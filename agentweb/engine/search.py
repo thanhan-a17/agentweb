@@ -103,11 +103,12 @@ def search_providers(
         "text": "",  # no full text at search stage
     } for r in all_items]
 
-    # Apply two-pass semantic ranking
+    # Apply two-pass semantic ranking (context augments the ranking query)
     ranked = rank_results(
         query,
         result_dicts,
         prefer=prefer,
+        context=context,
         top_n=max_results,
     )
 
