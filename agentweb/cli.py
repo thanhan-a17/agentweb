@@ -66,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("query")
     s.add_argument("--max-results", type=_parse_int_or_range, default=8)
     s.add_argument("--timeout", type=int, default=30)
+    s.add_argument("--prefer", nargs="*", help="Provider names to prefer.")
+    s.add_argument("--exclude", nargs="*", help="Provider names to exclude.")
+    s.add_argument("--context", help="Optional context string.")
     s.add_argument("--format", choices=["json", "markdown"], default="json")
     s.add_argument("--output", "-o")
 
@@ -85,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-results", type=_parse_int_or_range, default=6)
     r.add_argument("--timeout", type=int, default=30)
     r.add_argument("--max-chars", type=_parse_int_or_range, default=6000)
+    r.add_argument("--context", help="Optional context string.")
     r.add_argument("--format", choices=["json", "markdown"], default="json")
     r.add_argument("--output", "-o")
 
@@ -94,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--timeout", type=int, default=30)
     dr.add_argument("--max-chars", type=_parse_int_or_range, default=6000)
     dr.add_argument("--refinement-loops", type=int, default=1)
+    dr.add_argument("--context", help="Optional context string.")
     dr.add_argument("--format", choices=["json", "markdown"], default="markdown")
     dr.add_argument("--output", "-o")
 
@@ -107,7 +112,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "search":
             _check_guard(guard.validate_text(args.query))
-            result = aw.search(args.query, max_results=args.max_results, timeout=args.timeout)
+            result = aw.search(
+                args.query,
+                max_results=args.max_results,
+                timeout=args.timeout,
+                prefer=args.prefer,
+                exclude=args.exclude,
+                context=args.context,
+            )
             results = result["results"]
             if args.format == "markdown":
                 lines = [f"# AgentWeb search: {args.query}", ""]
@@ -156,7 +168,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "research":
             _check_guard(guard.validate_text(args.query))
-            pack = aw.research(args.query, max_results=args.max_results, timeout=args.timeout, max_chars=args.max_chars)
+            pack = aw.research(
+                args.query,
+                max_results=args.max_results,
+                timeout=args.timeout,
+                max_chars=args.max_chars,
+                context=args.context,
+            )
             if args.format == "markdown":
                 _emit(format_markdown_research(pack), "text", args.output)
             else:
@@ -170,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 max_chars=args.max_chars,
                 refinement_loops=args.refinement_loops,
+                context=args.context,
             )
             if args.format == "markdown":
                 _emit(result["report_markdown"], "text", args.output)
