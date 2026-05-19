@@ -14,7 +14,7 @@ __all__ = [
     "format_markdown_fetch",
     "format_markdown_research",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from agentweb.authenticity import ContentAuthenticity
 from agentweb.engine.rank import compute_novelty_scores
