@@ -1,3 +1,5 @@
+![AgentWeb](assets/agentweb-offer.svg)
+
 # AgentWeb
 
 **Web access for AI agents. No API keys. No AI bills. No setup.**
