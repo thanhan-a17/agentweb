@@ -48,13 +48,12 @@ Upgrade: `curl -fsSL https://raw.githubusercontent.com/thanhan-a17/agentweb/main
 | `--max-chars` | fetch, research, deep-research | Max chars per source (supports ranges) |
 | `--format` | all | `json` or `markdown` |
 | `--output` / `-o` | all | Write to file |
-| `--prefer` | search | Prioritize specific providers (e.g. `--prefer github,reddit`) |
-| `--exclude` | search | Skip providers (e.g. `--exclude youtube,arxiv`) |
-| `--context` | search, research | Context string injected into ranking query |
+| `--prefer` | search | Prioritize specific providers (e.g. `--prefer github reddit`) |
+| `--exclude` | search | Skip providers (e.g. `--exclude youtube arxiv`) |
+| `--context` | search, research, deep-research | Context string injected into ranking query |
 | `--cookies` | fetch | Cookie string or Netscape cookies.txt path |
 | `--browser` | fetch | Try browser snapshot fallback |
 | `--refinement-loops` | deep-research | Iterative refinement passes |
-| `--provider` | search | Restrict to specific provider |
 
 ```bash
 # LLM hints steer the source mix
@@ -74,7 +73,7 @@ aw = AgentWeb()
 # Search with provider steering
 result = aw.search("latest ML papers", prefer=["github", "arxiv"])
 for item in result["results"]:
-    print(item["title"], item["url"], item["source"], item["meta"]["confidence"])
+    print(item["title"], item["url"], item["source"], item["confidence"])
 
 # Fetch with auto-escalation
 page = aw.fetch("https://example.com", use_browser=True)
