@@ -1228,7 +1228,7 @@ def research(
     # Apply refine: append refinement text to the search query
     search_query = f"{query} {refine}".strip() if refine else query
 
-    search_results = search_web(search_query, max_results=max_results, timeout=timeout)
+    search_results = search_web(search_query, max_results=max_results, timeout=timeout, context=context)
 
     # Apply exclude_sources on search results
     if exclude_sources:
