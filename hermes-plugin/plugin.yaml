@@ -1,0 +1,7 @@
+name: agentweb
+version: 1.0.0
+description: "AgentWeb web search provider — free multi-source search with DDG, arXiv, Wikipedia, GitHub, Reddit, HN, YouTube, and more. No API key required."
+author: AgentWeb
+kind: backend
+provides_web_providers:
+  - agentweb

@@ -182,3 +182,80 @@ The query planner generates branch intents → each branch auto-generates provid
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Hermes Agent Integration
+
+Use AgentWeb as a drop-in web search backend for [Hermes Agent](https://hermes-agent.nousresearch.com). No API keys needed — AgentWeb's free multi-source search becomes your `web_search` and `web_extract` tool.
+
+### Quick Install
+
+From the AgentWeb repo root:
+
+```bash
+# 1. Symlink the Hermes plugin into your user plugins directory
+mkdir -p ~/.hermes/plugins
+ln -sf "$PWD/hermes-plugin" ~/.hermes/plugins/agentweb
+
+# 2. Enable the plugin in Hermes config
+hermes config set plugins.enabled '["agentweb"]'
+
+# 3. Set agentweb as the web backend
+hermes config set web.backend agentweb
+```
+
+That's it. No API keys, no additional setup.
+
+### Verify
+
+```bash
+# Check the plugin loaded
+hermes plugins list | grep agentweb
+
+# Test web_search through Hermes
+hermes chat -q "search the web for 'Hermes Agent 2026' and give me 3 results" --yolo
+```
+
+If Hermes returns search results, AgentWeb is live as your web backend.
+
+### Configuration
+
+| Option | Value | Notes |
+|--------|-------|-------|
+| `web.backend` | `agentweb` | Use AgentWeb for both search and extract |
+| `web.search_backend` | `agentweb` | Override search only |
+| `web.extract_backend` | `agentweb` | Override extract only |
+| `plugins.enabled` | `["agentweb"]` | Required for user plugins |
+
+If you also want the DuckDuckGo fallback disabled (so AgentWeb is the *only* search provider), unset `web.backend` and set both per-capability keys:
+
+```bash
+hermes config set web.search_backend agentweb
+hermes config set web.extract_backend agentweb
+```
+
+### How It Works
+
+The plugin (`hermes-plugin/`) is a standard Hermes backend plugin:
+
+- **`plugin.yaml`** — metadata manifest (name, version, kind)
+- **`__init__.py`** — registers the provider with Hermes plugin context
+- **`provider.py`** — `WebSearchProvider` subclass that shells out to `agentweb search` and `agentweb fetch`
+
+When Hermes receives a `web_search` call, it routes to AgentWeb, which fires 12+ sources in parallel (DDG, arXiv, Wikipedia, GitHub, Reddit, HN, YouTube, StackExchange, and more), ranks results with BM25 + FlashRank, and returns structured results. Same for `web_extract` — it uses `agentweb fetch` with automatic layered extraction (direct HTTP → trafilatura → Jina Reader → stealth browser).
+
+### Updating
+
+The plugin is symlinked to your AgentWeb checkout. Update both together:
+
+```bash
+cd /path/to/agentweb
+git pull
+uv tool upgrade agentweb
+# Plugin symlink still points to the updated hermes-plugin/ directory
+```
+
+### Requirements
+
+- Hermes Agent v0.14.0+
+- `agentweb` CLI installed (`which agentweb` succeeds)
+- Plugin runs locally — no cloud dependencies
