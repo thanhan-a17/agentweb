@@ -39,7 +39,7 @@ echo -e "${YELLOW}→ Installing AgentWeb (with browser + crawl support)...${NC}
 echo ""
 
 uv tool install --reinstall \
-    'agentweb[browser,crawl] @ git+https://github.com/thanhan-a17/agentweb.git' \
+    'agentweb[browser,crawl,youtube] @ git+https://github.com/thanhan-a17/agentweb.git' \
     2>&1 | while IFS= read -r line; do
     # Indent output so it's clearly from uv
     echo -e "  ${line}"
