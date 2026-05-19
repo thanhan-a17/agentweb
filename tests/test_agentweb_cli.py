@@ -9,6 +9,15 @@ from agentweb.core import fetch_url, research
 from agentweb import core
 
 
+class TestDDGS:
+    """Mock DDGS for testing _search_duckduckgo."""
+    def text(self, query, max_results=10):
+        return [
+            {"title": "Hermes Agent - Nous Research", "href": "https://example.com/hermes", "body": "An AI agent framework"},
+            {"title": "AgentWeb CLI", "href": "https://github.com/example/agentweb", "body": "Zero-API web access"},
+        ]
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if self.path == "/next":
@@ -85,26 +94,16 @@ def test_cli_fetch_json(capsys):
         httpd.shutdown()
 
 
-def test_duckduckgo_search_skips_ad_redirects(monkeypatch):
-    ad = "https://duckduckgo.com/y.js?ad_domain=amazon.com&ad_provider=bingv7aa"
-    organic = "https://example.com/hermes"
-    raw = f'''
-    <div class="result results_links">
-      <a class="result__a" href="{ad}">Save on hermes agent - Amazon.com Official Site</a>
-      <a class="result__snippet">Sponsored result</a>
-    </div></div>
-    <div class="result results_links">
-      <a class="result__a" href="/l/?uddg={organic}">Hermes Agent real result</a>
-      <a class="result__snippet">Organic result</a>
-    </div></div>
-    '''
-
-    class Resp:
-        text = raw
-
-    monkeypatch.setattr(core.requests, "get", lambda *args, **kwargs: Resp())
-    results = core._search_duckduckgo_html("hermes agent", max_results=5, timeout=5)
-    assert [r.url for r in results] == [organic]
+def test_duckduckgo_search_returns_structured_results(monkeypatch):
+    """Test _search_duckduckgo parses DDGS.text() output correctly."""
+    monkeypatch.setattr(core, "DDGS", lambda: TestDDGS())
+    results = core._search_duckduckgo("hermes agent", max_results=5, timeout=5)
+    assert len(results) == 2
+    assert results[0].title == "Hermes Agent - Nous Research"
+    assert results[0].url == "https://example.com/hermes"
+    assert results[0].snippet == "An AI agent framework"
+    assert results[0].source == "duckduckgo"
+    assert results[1].title == "AgentWeb CLI"
 
 
 def test_research_pack_uses_search_results(monkeypatch):
