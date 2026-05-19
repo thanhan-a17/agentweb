@@ -4,7 +4,8 @@
 set -euo pipefail
 
 REPO="thanhan-a17/agentweb"
-SKILL_DIR="$HOME/.hermes/skills/software-development/agentweb-use"
+HERMES_DIR="${HERMES_HOME:-$HOME/.hermes}"
+SKILL_DIR="$HERMES_DIR/skills/software-development/agentweb-use"
 BASE_URL="https://raw.githubusercontent.com/$REPO/main/hermes-skill"
 
 BOLD='\033[1m'
@@ -13,8 +14,8 @@ YELLOW='\033[0;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-if [ ! -d "$HOME/.hermes" ]; then
-    echo -e "${RED}✗ ~/.hermes not found — Hermes Agent not installed${NC}"
+if [ ! -d "$HERMES_DIR" ]; then
+    echo -e "${RED}✗ Hermes home not found at $HERMES_DIR — is Hermes Agent installed?${NC}"
     exit 1
 fi
 

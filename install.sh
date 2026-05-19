@@ -63,8 +63,9 @@ else
 fi
 
 # ── Step 4: Install Hermes skill (if Hermes is present) ──
-HERMES_SKILL_DIR="$HOME/.hermes/skills/software-development/agentweb-use"
-if [ -d "$HOME/.hermes" ]; then
+HERMES_DIR="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_SKILL_DIR="$HERMES_DIR/skills/software-development/agentweb-use"
+if [ -d "$HERMES_DIR" ]; then
     echo ""
     echo -e "${YELLOW}→ Installing Hermes skill for agentweb-use...${NC}"
     mkdir -p "$HERMES_SKILL_DIR/references"
@@ -77,8 +78,8 @@ if [ -d "$HOME/.hermes" ]; then
     echo -e "${GREEN}✓ Hermes skill installed${NC}"
 else
     echo ""
-    echo -e "${YELLOW}→ ~/.hermes not found — skipping Hermes skill install${NC}"
-    echo "  (Hermes Agent users can install manually: mkdir -p ~/.hermes/skills/software-development/agentweb-use && curl -fsSL https://raw.githubusercontent.com/$REPO/main/hermes-skill/install-hermes.sh | bash)"
+    echo -e "${YELLOW}→ Hermes home not found at $HERMES_DIR — skipping Hermes skill install${NC}"
+    echo "  (Hermes Agent users can install manually: HERMES_HOME=\$HERMES_DIR curl -fsSL https://raw.githubusercontent.com/$REPO/main/hermes-skill/install-hermes.sh | bash)"
 fi
 
 echo ""
