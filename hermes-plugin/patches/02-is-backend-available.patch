@@ -1,0 +1,29 @@
+From: AgentWeb
+Date: 2026-05-19
+Subject: Allow custom registered providers in _is_backend_available()
+
+The _is_backend_available() function only checks env vars / package
+availability for the built-in provider set. Without this patch,
+setting web.search_backend or web.extract_backend to a custom
+provider name causes _get_capability_backend() to silently fall
+through to _get_backend(), ignoring the user's explicit config.
+
+diff --git a/tools/web_tools.py b/tools/web_tools.py
+--- a/tools/web_tools.py
++++ b/tools/web_tools.py
+@@ -218,7 +218,14 @@ def _is_backend_available(backend: str) -> bool:
+         return _has_env("BRAVE_SEARCH_API_KEY")
+     if backend == "ddgs":
+         return _ddgs_package_importable()
+-    return False
++    # Unknown backend — check if it's a registered custom provider
++    # (e.g. from a user plugin).  Assume available if registered so
++    # the per-capability config path doesn't silently fall through.
++    try:
++        from agent.web_search_registry import get_provider as _wsp_get_provider
++        return _wsp_get_provider(backend) is not None
++    except ImportError:
++        return False
+ 
+ 
+ def _ddgs_package_importable() -> bool:

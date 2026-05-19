@@ -192,16 +192,26 @@ Use AgentWeb as a drop-in web search backend for [Hermes Agent](https://hermes-a
 From the AgentWeb repo root:
 
 ```bash
-# 1. Symlink the Hermes plugin into your user plugins directory
+# 1. Apply required patch to Hermes' web_tools.py (needed once)
+#     This lets custom registered providers pass through the built-in
+#     backend whitelist. Both patches are in hermes-plugin/patches/.
+cd ~/.hermes/hermes-agent
+curl -sL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/hermes-plugin/patches/01-get-backend.patch | git apply
+curl -sL https://raw.githubusercontent.com/thanhan-a17/agentweb/main/hermes-plugin/patches/02-is-backend-available.patch | git apply
+cd -
+
+# 2. Symlink the Hermes plugin into your user plugins directory
 mkdir -p ~/.hermes/plugins
 ln -sf "$PWD/hermes-plugin" ~/.hermes/plugins/agentweb
 
-# 2. Enable the plugin in Hermes config
+# 3. Enable the plugin in Hermes config
 hermes config set plugins.enabled '["agentweb"]'
 
-# 3. Set agentweb as the web backend
+# 4. Set agentweb as the web backend
 hermes config set web.backend agentweb
 ```
+
+> **Why the patches?** Hermes' `_get_backend()` and `_is_backend_available()` have a hardcoded whitelist of built-in providers (firecrawl, parallel, ddgs, etc.). Custom plugins like AgentWeb aren't in that list. The patches add a fallback that checks the web search registry for registered providers — so `web.backend: agentweb` is recognized without modifying the whitelist itself.
 
 That's it. No API keys, no additional setup.
 

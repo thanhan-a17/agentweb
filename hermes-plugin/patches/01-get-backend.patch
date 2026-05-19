@@ -1,0 +1,29 @@
+From: AgentWeb
+Date: 2026-05-19
+Subject: Allow custom registered providers through backend whitelist
+
+The _get_backend() function has a hardcoded whitelist of built-in
+providers. This patch adds a fallback that checks the web search
+registry — so custom plugins (like AgentWeb) registered via
+PluginContext.register_web_search_provider() are recognized even
+though they aren't in the built-in list.
+
+diff --git a/tools/web_tools.py b/tools/web_tools.py
+--- a/tools/web_tools.py
++++ b/tools/web_tools.py
+@@ -142,6 +142,15 @@ def _get_backend() -> str:
+     configured = (_load_web_config().get("backend") or "").lower().strip()
+     if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs"}:
+         return configured
++    if configured:
++        # Allow configured backends that aren't in the built-in whitelist
++        # but are registered as custom providers (e.g. from user plugins).
++        try:
++            from agent.web_search_registry import get_provider as _wsp_get_provider
++            if _wsp_get_provider(configured) is not None:
++                return configured
++        except ImportError:
++            pass
+ 
+     # Fallback for manual / legacy config — pick the highest-priority
+     # available backend. Firecrawl also counts as available when the managed
